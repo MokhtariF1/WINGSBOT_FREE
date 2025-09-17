@@ -475,7 +475,7 @@ def build_application() -> Application:
     # Reseller approvals (global)
     application.add_handler(CallbackQueryHandler(admin_reseller_approve, pattern=r'^reseller_approve_\d+$'), group=3)
     application.add_handler(CallbackQueryHandler(admin_reseller_reject, pattern=r'^reseller_reject_\d+$'), group=3)
-    application.add_handler(CallbackQueryHandler(admin_reseller_menu, pattern=r'^admin_reseller_menu$'), group=3)
+    application.add_handler(CallbackQueryHandler(admin_reseller_menu, pattern='^admin_reseller_menu$'), group=3)
     application.add_handler(CallbackQueryHandler(admin_reseller_delete_start, pattern=r'^admin_reseller_delete_start$'), group=3)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reseller_delete_receive), group=-2)
     # Reseller user flows
@@ -680,7 +680,11 @@ def build_application() -> Application:
             WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
             WALLET_AWAIT_CUSTOM_AMOUNT_CARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
             WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
-            WALLET_AWAIT_CARD_SCREENSHOT: [MessageHandler(filters.ALL & ~filters.COMMAND, composite_upload_router)],
+            WALLET_AWAIT_CARD_SCREENSHOT: [
+                CallbackQueryHandler(wallet_upload_start_card, pattern=r'^wallet_upload_start_card$'),
+                CallbackQueryHandler(wallet_upload_start_crypto, pattern=r'^wallet_upload_start_crypto$'),
+                MessageHandler(filters.ALL & ~filters.COMMAND, composite_upload_router)
+            ],
         },
         fallbacks=[CallbackQueryHandler(wallet_menu, pattern='^wallet_menu$')],
         allow_reentry=True,

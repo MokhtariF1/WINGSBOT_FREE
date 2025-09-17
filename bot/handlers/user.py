@@ -14,6 +14,7 @@ from ..utils import bytes_to_gb
 from ..states import (
     WALLET_AWAIT_AMOUNT_CARD,
     WALLET_AWAIT_CUSTOM_AMOUNT_CARD,
+    WALLET_AWAIT_AMOUNT_CRYPTO,
     WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO,
     WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY,
     WALLET_AWAIT_CARD_SCREENSHOT,
@@ -1447,7 +1448,7 @@ async def wallet_topup_custom_amount_start(update: Update, context: ContextTypes
 
 async def wallet_topup_custom_amount_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives and validates the custom top-up amount."""
-    amount_str = update.message.text
+    amount_str = _normalize_amount_text(update.message.text)
     try:
         amount = int(amount_str)
         if amount <= 0:
@@ -1469,20 +1470,41 @@ async def wallet_topup_custom_amount_receive(update: Update, context: ContextTyp
     # Now, route to the correct handler based on the method
     method = context.user_data.get('wallet_method')
     if method == 'card':
-        return await wallet_topup_card_receive_amount(update, context)
+        context.user_data['awaiting'] = 'wallet_upload'
+        cards = query_db("SELECT card_number, holder_name FROM cards")
+        if not cards:
+            await update.message.reply_text("خطا: هیچ کارت بانکی در سیستم ثبت نشده است.")
+            return ConversationHandler.END
+        lines = [f"\U0001F4B0 مبلغ: {amount:,} تومان", "\nبه یکی از کارت‌های زیر واریز کنید و سپس روی دکمه زیر بزنید و رسید را ارسال کنید:"]
+        for c in cards:
+            lines.append(f"- {c['holder_name']}\n{ltr_code(c['card_number'])}")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ارسال اسکرین‌شات", callback_data='wallet_upload_start_card')], [InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]])
+        await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+        context.user_data.pop('wallet_prompt_msg_id', None)
+        return WALLET_AWAIT_CARD_SCREENSHOT
     elif method == 'crypto':
-        return await wallet_topup_crypto_receive_amount(update, context)
+        context.user_data['awaiting'] = 'wallet_upload'
+        wallets = query_db("SELECT asset, chain, address, memo FROM wallets ORDER BY id DESC")
+        if not wallets:
+            await update.message.reply_text("هیچ ولتی ثبت نشده است. لطفا بعدا تلاش کنید.")
+            return ConversationHandler.END
+        lines = ["لطفا مبلغ معادل را به یکی از ولت‌های زیر واریز کرده و سپس روی دکمه زیر بزنید و رسید را ارسال کنید:"]
+        for w in wallets:
+            memo = f"\nMEMO: {w['memo']}" if w.get('memo') else ''
+            lines.append(f"- {w['asset']} ({w['chain']}):\n{w['address']}{memo}")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ارسال اسکرین‌شات", callback_data='wallet_upload_start_crypto')], [InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]])
+        await update.message.reply_text("\n\n".join(lines), reply_markup=kb)
+        context.user_data.pop('wallet_prompt_msg_id', None)
+        return WALLET_AWAIT_CARD_SCREENSHOT
     elif method == 'gateway':
-        # This one is a bit different, it redirects to a verification URL
-        return await wallet_topup_gateway_receive_amount(update, context)
+        # This one is a bit different, it needs to be routed to show the gateway message
+        dummy = type('obj', (object,), {'message': update.message})
+        return await _wallet_show_gateway_message(dummy, context)
     
     return ConversationHandler.END
 
 async def wallet_topup_card_receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # This path is now disabled and logic is moved to select_amount/custom_amount handlers
     if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        # disabled: only via buttons
-        return ConversationHandler.END
-    else:
-        return ConversationHandler.END
+        await update.callback_query.answer("این دکمه غیرفعال است.", show_alert=True)
+    return ConversationHandler.END
