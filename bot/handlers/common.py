@@ -7,6 +7,7 @@ from ..config import ADMIN_ID, CHANNEL_ID, CHANNEL_USERNAME, logger
 from ..db import query_db
 from ..utils import register_new_user
 from ..helpers.flow import get_flow
+from ..helpers.keyboards import build_start_menu_keyboard
 
 
 async def force_join_checker(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,56 +128,13 @@ async def send_dynamic_message(update: Update, context: ContextTypes.DEFAULT_TYP
 				keyboard_rows[b['row'] - 1].append(btn)
 		keyboard = [row for row in keyboard_rows if row]
 
-	# Fallback: ensure core user buttons arranged with top row [Buy, GetFree] and next row [My Services, ...]
 	if message_name == 'start_main':
-		missing = lambda target: not any((b.get('target') == target) for b in (buttons_data or []))
-		# Top row: Buy + Get Free (if enabled and missing)
-		top_row = []
-		if missing('buy_config_main'):
-			top_row.append(InlineKeyboardButton("\U0001F4E1 خرید کانفیگ", callback_data='buy_config_main'))
-		trial_status = query_db("SELECT value FROM settings WHERE key = 'free_trial_status'", one=True)
-		if trial_status and trial_status.get('value') == '1' and missing('get_free_config'):
-			top_row.append(InlineKeyboardButton("\U0001F381 دریافت تست", callback_data='get_free_config'))
-		if top_row:
-			keyboard.append(top_row)
-		# Second row starts with My Services if missing
-		second_row = []
-		if missing('my_services'):
-			second_row.append(InlineKeyboardButton("\U0001F4DD سرویس‌های من", callback_data='my_services'))
-		# Fill remaining core buttons in subsequent rows
-		def add_button_if_missing(row_acc, target, text):
-			if missing(target):
-				row_acc.append(InlineKeyboardButton(text, callback_data=target))
-				return True
-			return False
-		# Complete second row up to 2
-		if add_button_if_missing(second_row, 'wallet_menu', "\U0001F4B3 کیف پول من") and len(second_row) == 2:
-			keyboard.append(second_row); second_row = []
-		if len(second_row) == 2:
-			keyboard.append(second_row); second_row = []
-		if second_row:
-			keyboard.append(second_row); second_row = []
-		# Remaining rows (pairs)
-		remaining_targets = [
-			('wallet_menu', "\U0001F4B3 کیف پول من"),
-			('support_menu', "\U0001F4AC پشتیبانی"),
-			('tutorials_menu', "\U0001F4D6 آموزش‌ها"),
-			('referral_menu', "\U0001F517 معرفی به دوستان"),
-			('reseller_menu', "\U0001F4B5 دریافت نمایندگی"),
-		]
-		row = []
-		for tgt, label in remaining_targets:
-			if missing(tgt):
-				row.append(InlineKeyboardButton(label, callback_data=tgt))
-				if len(row) == 2:
-					keyboard.append(row); row = []
-		if row:
-			keyboard.append(row)
-
-	if message_name != 'start_main':
+		# For start_main, the dynamic keyboard builder handles everything
+		reply_markup = build_start_menu_keyboard()
+	else:
 		keyboard.append([InlineKeyboardButton("\U0001F519 بازگشت", callback_data=back_to)])
+		reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
-	reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
 	try:
 		if file_id or (query.message and (query.message.photo or query.message.video or query.message.document)):
@@ -230,71 +188,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	message_data = query_db("SELECT text FROM messages WHERE message_name = 'start_main'", one=True)
 	text = message_data.get('text') if message_data else "خوش آمدید!"
 
-	buttons_data = query_db(
-		"SELECT text, target, is_url, row, col FROM buttons WHERE menu_name = 'start_main' ORDER BY row, col"
-	)
+	reply_markup = build_start_menu_keyboard()
 
-	trial_status = query_db("SELECT value FROM settings WHERE key = 'free_trial_status'", one=True)
-	if not trial_status or trial_status.get('value') != '1':
-		buttons_data = [b for b in buttons_data if b.get('target') != 'get_free_config']
-
-	keyboard = []
-	if buttons_data:
-		max_row = max((b['row'] for b in buttons_data), default=0)
-		keyboard_rows = [[] for _ in range(max_row + 1)]
-		for b in buttons_data:
-			btn = (
-				InlineKeyboardButton(b['text'], url=b['target'])
-				if b['is_url']
-				else InlineKeyboardButton(b['text'], callback_data=b['target'])
-			)
-			if 0 < b['row'] <= len(keyboard_rows):
-				keyboard_rows[b['row'] - 1].append(btn)
-		keyboard = [row for row in keyboard_rows if row]
-
-	# Fallback: ensure core user buttons arranged neatly (rows of 2)
-	# Fallback arrangement with top row [Buy, GetFree] and second row starting with My Services
-	missing = lambda target: not any((b.get('target') == target) for b in (buttons_data or []))
-	# Top row
-	top_row = []
-	if missing('buy_config_main'):
-		top_row.append(InlineKeyboardButton("\U0001F4E1 خرید کانفیگ", callback_data='buy_config_main'))
-	trial_status = query_db("SELECT value FROM settings WHERE key = 'free_trial_status'", one=True)
-	if trial_status and trial_status.get('value') == '1' and missing('get_free_config'):
-		top_row.append(InlineKeyboardButton("\U0001F381 دریافت تست", callback_data='get_free_config'))
-	if top_row:
-		keyboard.append(top_row)
-	# Second row begins with My Services
-	second_row = []
-	if missing('my_services'):
-		second_row.append(InlineKeyboardButton("\U0001F4DD سرویس‌های من", callback_data='my_services'))
-	# Fill remaining in pairs
-	remaining_targets = [
-		('wallet_menu', "\U0001F4B3 کیف پول من"),
-		('support_menu', "\U0001F4AC پشتیبانی"),
-		('tutorials_menu', "\U0001F4D6 آموزش‌ها"),
-		('referral_menu', "\U0001F517 معرفی به دوستان"),
-		('reseller_menu', "\U0001F4B5 دریافت نمایندگی"),
-	]
-	if second_row:
-		# Try to add one more to complete the row
-		for tgt, label in list(remaining_targets):
-			if missing(tgt) and len(second_row) < 2:
-				second_row.append(InlineKeyboardButton(label, callback_data=tgt))
-		keyboard.append(second_row)
-	row = []
-	for tgt, label in remaining_targets:
-		if missing(tgt):
-			# Skip ones already used in second_row
-			if any(btn.text == label for btn in keyboard[-1]) if keyboard else False:
-				continue
-			row.append(InlineKeyboardButton(label, callback_data=tgt))
-			if len(row) == 2:
-				keyboard.append(row); row = []
-	if row:
-		keyboard.append(row)
-
-	reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 	if update.callback_query:
 		try:
 			await update.callback_query.message.delete()
@@ -307,22 +202,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def dynamic_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 	query = update.callback_query
-
-	reserved_prefixes = [
-		'approve_', 'reject_', 'plan_', 'select_plan_', 'card_', 'msg_', 'edit_plan_',
-		'btn_', 'noop_', 'renew_', 'set_', 'delete_discount_', 'add_discount_code',
-		'panel_', 'backup_', 'admin_', 'apply_discount_start', 'confirm_purchase',
-		'get_free_config', 'my_services', 'view_service_', 'check_join', 'buy_config_main',
-		'inbound_', 'wallet_', 'pay_method_', 'wallet_tx_', 'ticket_', 'gateway_verify_', 'tutorial_', 'referral_'
-	]
-
-	if any(query.data.startswith(p) for p in reserved_prefixes):
-		return
-
-	await query.answer()
 	message_name = query.data
 
+	# First, check if the callback data corresponds to a dynamic message.
+	# This is safer than a blacklist of prefixes.
 	if query_db("SELECT 1 FROM messages WHERE message_name = ?", (message_name,), one=True):
+		await query.answer()
 		await send_dynamic_message(update, context, message_name=message_name, back_to='start_main')
-	else:
-		await query.answer("این دکمه در حال حاضر کار نمی‌کند.", show_alert=True)
+		# Stop further handlers from processing this update
+		raise ApplicationHandlerStop
+
+	# If it's not a dynamic message, just return and let other handlers (with more specific patterns) process it.
+	return
