@@ -6,9 +6,18 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..db import query_db, execute_db
+from ..utils import register_new_user
+from ..helpers.flow import set_flow, clear_flow
+from ..helpers.keyboards import build_start_menu_keyboard
 from ..panel import VpnPanelAPI
 from ..utils import bytes_to_gb
-from ..states import WALLET_AWAIT_AMOUNT_GATEWAY, WALLET_AWAIT_AMOUNT_CARD, WALLET_AWAIT_CARD_SCREENSHOT, WALLET_AWAIT_AMOUNT_CRYPTO, WALLET_AWAIT_CRYPTO_SCREENSHOT, RESELLER_AWAIT_UPLOAD
+from ..states import (
+    WALLET_AWAIT_AMOUNT_CARD,
+    WALLET_AWAIT_CUSTOM_AMOUNT_CARD,
+    WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO,
+    WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY,
+    WALLET_AWAIT_CARD_SCREENSHOT,
+)
 from ..states import SUPPORT_AWAIT_TICKET
 from ..config import ADMIN_ID
 from ..helpers.tg import ltr_code, notify_admins
@@ -354,7 +363,7 @@ async def show_specific_service_details(update: Update, context: ContextTypes.DE
     link_value = f"<code>{sub_link}</code>"
     if panel_type in ('3xui','3x-ui','3x ui','xui','x-ui','sanaei','alireza','txui','tx-ui','tx ui'):
         link_label = "\U0001F517 کانفیگ‌ها:"
-        link_value = "کانفیگی یافت نشد. دکمه ‘دریافت لینک مجدد’ را بزنید تا ساخته شود."
+        link_value = "کانفیگی یافت نشد. دکمه 'دریافت لینک مجدد' را بزنید تا ساخته شود."
         try:
             confs = []
             if hasattr(panel_api, 'list_inbounds') and hasattr(panel_api, 'get_configs_for_user_on_inbound'):
@@ -579,7 +588,7 @@ async def revoke_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 panel_type = (prow.get('panel_type') or '').lower()
         if panel_type in ('3xui','3x-ui','3x ui'):
             try:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=("\U0001F511 کلید جدید صادر شد، چند لحظه بعد ‘دریافت لینک مجدد’ را بزنید."), parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id=query.message.chat_id, text=("\U0001F511 کلید جدید صادر شد، چند لحظه بعد 'دریافت لینک مجدد' را بزنید."), parse_mode=ParseMode.HTML)
             except Exception:
                 pass
             return ConversationHandler.END
@@ -687,17 +696,19 @@ async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _amount_keyboard(method: str) -> InlineKeyboardMarkup:
-    amounts = [50000, 100000, 250000, 350000, 500000, 1000000, 2000000]
-    rows = []
+    amounts = [50000, 100000, 200000, 500000, 1000000]
+    keyboard = []
     row = []
-    for i, amt in enumerate(amounts, 1):
-        row.append(InlineKeyboardButton(f"{amt:,}", callback_data=f"wallet_amt_{method}_{amt}"))
-        if i % 3 == 0:
-            rows.append(row); row = []
+    for amount in amounts:
+        row.append(InlineKeyboardButton(f"{amount:,} تومان", callback_data=f'wallet_amt_{method}_{amount}'))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
     if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')])
-    return InlineKeyboardMarkup(rows)
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("مبلغ دلخواه", callback_data=f'wallet_amt_{method}_custom')])
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def wallet_topup_gateway_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -833,50 +844,34 @@ async def wallet_topup_card_start(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def wallet_topup_card_receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # disabled: only via buttons
-    return ConversationHandler.END
-
-
-async def wallet_topup_card_receive_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    awaiting = context.user_data.get('awaiting')
-    method_hint = context.user_data.get('wallet_method')
-    if awaiting not in ('wallet_card_screenshot','wallet_crypto_screenshot'):
-        # allow if method + amount present (fallback)
-        if method_hint not in ('card','crypto') or not context.user_data.get('wallet_topup_amount'):
-            return ConversationHandler.END
-        # set awaiting based on method for downstream
-        awaiting = 'wallet_card_screenshot' if method_hint == 'card' else 'wallet_crypto_screenshot'
-        context.user_data['awaiting'] = awaiting
-    # accept photo or document
-    photo_file_id = None
-    if update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id
-    elif update.message.document:
-        photo_file_id = update.message.document.file_id
-    if not photo_file_id:
-        await update.message.reply_text("لطفا اسکرین‌شات معتبر ارسال کنید.")
-        return WALLET_AWAIT_CARD_SCREENSHOT if awaiting == 'wallet_card_screenshot' else WALLET_AWAIT_CRYPTO_SCREENSHOT
-    user_id = update.effective_user.id
-    amount = context.user_data.get('wallet_topup_amount')
-    if not amount:
-        await update.message.reply_text("مبلغ یافت نشد. دوباره شروع کنید.")
+    # This function is now only called from the custom amount flow, 
+    # so we don't need to handle callback queries here.
+    if not update.message:
         return ConversationHandler.END
-    method = method_hint or ('card' if awaiting == 'wallet_card_screenshot' else 'crypto')
-    tx_id = execute_db("INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at, screenshot_file_id) VALUES (?, ?, 'credit', ?, 'pending', ?, ?)", (user_id, int(amount), method, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), photo_file_id))
-    # Notify admins with photo
-    caption = (f"\U0001F4B8 درخواست شارژ کیف پول ({'Card' if method=='card' else 'Crypto'})\n\n"
-               f"کاربر: `{user_id}`\n"
-               f"مبلغ: {int(amount):,} تومان")
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("\u2705 تایید", callback_data=f"wallet_tx_approve_{tx_id}"), InlineKeyboardButton("\u274C رد", callback_data=f"wallet_tx_reject_{tx_id}")],
-        [InlineKeyboardButton("\U0001F4B8 منوی درخواست‌ها", callback_data="admin_wallet_tx_menu")],
-    ])
-    await notify_admins(context.bot, photo=photo_file_id, caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    await update.message.reply_text("درخواست شارژ ثبت شد و پس از تایید ادمین اعمال می‌شود.")
-    context.user_data.pop('wallet_topup_amount', None)
-    context.user_data.pop('wallet_method', None)
-    context.user_data.pop('awaiting', None)
-    return ConversationHandler.END
+
+    # The amount is already set in context by wallet_topup_custom_amount_receive
+    amount = context.user_data.get('wallet_topup_amount')
+    user_id = update.effective_user.id
+
+    cards = query_db("SELECT card_number, holder_name FROM cards")
+    if not cards:
+        await update.message.reply_text("در حال حاضر امکان پرداخت کارت به کارت وجود ندارد.")
+        return ConversationHandler.END
+
+    card_info_lines = [f"{card['card_number']} - {card['holder_name']}" for card in cards]
+    card_info_text = "\n".join(card_info_lines)
+    
+    invoice_text = (
+        f"**واریز به کارت**\n\n"
+        f"لطفا مبلغ **{amount:,} تومان** را به یکی از کارت‌های زیر واریز کرده و سپس از رسید خود اسکرین‌شات گرفته و در همین صفحه ارسال نمایید.\n\n"
+        f"{card_info_text}"
+    )
+    
+    await update.message.reply_text(invoice_text, parse_mode=ParseMode.MARKDOWN)
+    context.user_data['awaiting'] = 'wallet_upload'
+    context.user_data['wallet_method'] = 'card'
+    
+    return WALLET_AWAIT_SCREENSHOT
 
 
 async def wallet_topup_crypto_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -950,7 +945,7 @@ async def wallet_select_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("ارسال اسکرین‌شات", callback_data='wallet_upload_start_crypto')], [InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]])
         await query.message.edit_text("\n\n".join(lines), reply_markup=kb)
         context.user_data.pop('wallet_prompt_msg_id', None)
-        return WALLET_AWAIT_CRYPTO_SCREENSHOT
+        return WALLET_AWAIT_CARD_SCREENSHOT
     return ConversationHandler.END
 
 
@@ -1366,7 +1361,7 @@ async def wallet_upload_start_crypto(update: Update, context: ContextTypes.DEFAU
     context.user_data['awaiting'] = 'wallet_upload'
     context.user_data['wallet_method'] = 'crypto'
     await query.message.edit_text("رسید/اسکرین‌شات یا هر پیامی مرتبط با پرداخت را ارسال کنید تا برای ادمین ارسال شود.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]]))
-    return WALLET_AWAIT_CRYPTO_SCREENSHOT
+    return WALLET_AWAIT_CARD_SCREENSHOT
 
 
 async def wallet_upload_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1428,3 +1423,66 @@ async def wallet_upload_router(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.pop('wallet_topup_amount', None)
     clear_flow(context)
     return ConversationHandler.END
+
+
+async def wallet_topup_custom_amount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Asks the user to enter a custom top-up amount."""
+    query = update.callback_query
+    await query.answer()
+
+    method = query.data.split('_')[-2] # e.g., 'card', 'crypto', 'gateway'
+    context.user_data['wallet_method'] = method
+
+    await query.edit_message_text("لطفاً مبلغ مورد نظر خود را به تومان وارد کنید:")
+
+    if method == 'card':
+        return WALLET_AWAIT_CUSTOM_AMOUNT_CARD
+    elif method == 'crypto':
+        return WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO
+    elif method == 'gateway':
+        return WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY
+    
+    return ConversationHandler.END
+
+
+async def wallet_topup_custom_amount_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives and validates the custom top-up amount."""
+    amount_str = update.message.text
+    try:
+        amount = int(amount_str)
+        if amount <= 0:
+            raise ValueError("Amount must be positive.")
+    except (ValueError, TypeError):
+        await update.message.reply_text("مبلغ وارد شده نامعتبر است. لطفاً یک عدد صحیح مثبت وارد کنید.")
+        # Re-prompt by returning the same state
+        method = context.user_data.get('wallet_method')
+        if method == 'card':
+            return WALLET_AWAIT_CUSTOM_AMOUNT_CARD
+        elif method == 'crypto':
+            return WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO
+        elif method == 'gateway':
+            return WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY
+        return ConversationHandler.END
+
+    context.user_data['wallet_topup_amount'] = amount
+
+    # Now, route to the correct handler based on the method
+    method = context.user_data.get('wallet_method')
+    if method == 'card':
+        return await wallet_topup_card_receive_amount(update, context)
+    elif method == 'crypto':
+        return await wallet_topup_crypto_receive_amount(update, context)
+    elif method == 'gateway':
+        # This one is a bit different, it redirects to a verification URL
+        return await wallet_topup_gateway_receive_amount(update, context)
+    
+    return ConversationHandler.END
+
+async def wallet_topup_card_receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        # disabled: only via buttons
+        return ConversationHandler.END
+    else:
+        return ConversationHandler.END

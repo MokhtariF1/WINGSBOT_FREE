@@ -57,7 +57,18 @@ from .handlers.admin import (
     admin_reseller_menu, admin_toggle_reseller, admin_reseller_requests, admin_reseller_set_value_start, admin_reseller_set_value_save, admin_reseller_approve, admin_reseller_reject, admin_reseller_delete_start, admin_reseller_delete_receive,
     admin_toggle_signup_bonus, admin_set_signup_bonus_amount_start, admin_set_signup_bonus_amount_save,
 )
-from .handlers.user import get_free_config_handler, my_services_handler, show_specific_service_details, wallet_menu, wallet_topup_gateway_start, wallet_topup_gateway_receive_amount, wallet_topup_card_start, wallet_topup_card_receive_amount, wallet_topup_card_receive_screenshot, wallet_verify_gateway, wallet_topup_crypto_start, wallet_topup_crypto_receive_amount, wallet_topup_amount_router, support_menu, ticket_create_start, ticket_receive_message, tutorials_menu, tutorial_show, referral_menu, wallet_select_amount, wallet_upload_start_card, wallet_upload_start_crypto, composite_upload_router, refresh_service_link, revoke_key, reseller_menu, reseller_pay_start, reseller_pay_card, reseller_pay_crypto, reseller_pay_gateway, reseller_verify_gateway, reseller_upload_start_card, reseller_upload_start_crypto, reseller_upload_router
+from .handlers.user import (
+    get_free_config_handler, my_services_handler, show_specific_service_details, wallet_menu,
+    wallet_topup_gateway_start, wallet_topup_gateway_receive_amount, wallet_topup_card_start,
+    wallet_topup_card_receive_amount, wallet_verify_gateway,
+    wallet_topup_crypto_start, wallet_topup_crypto_receive_amount, wallet_topup_amount_router,
+    wallet_topup_custom_amount_start, wallet_topup_custom_amount_receive,
+    support_menu, ticket_create_start, ticket_receive_message, tutorials_menu, tutorial_show,
+    referral_menu, wallet_select_amount, wallet_upload_start_card, wallet_upload_start_crypto,
+    composite_upload_router, refresh_service_link, revoke_key, reseller_menu, reseller_pay_start,
+    reseller_pay_card, reseller_pay_crypto, reseller_pay_gateway, reseller_verify_gateway,
+    reseller_upload_start_card, reseller_upload_start_crypto, reseller_upload_router
+)
 from .handlers.purchase import (
     start_purchase_flow,
     show_plan_confirmation,
@@ -606,15 +617,10 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(reseller_menu, pattern=r'^reseller_menu$'), group=3)
 
     # User wallet flows and support/tutorials (global callbacks)
-    application.add_handler(CallbackQueryHandler(wallet_topup_gateway_start, pattern=r'^wallet_topup_gateway$'), group=3)
-    application.add_handler(CallbackQueryHandler(wallet_topup_card_start, pattern=r'^wallet_topup_card$'), group=3)
-    application.add_handler(CallbackQueryHandler(wallet_topup_crypto_start, pattern=r'^wallet_topup_crypto$'), group=3)
-    application.add_handler(CallbackQueryHandler(wallet_select_amount, pattern=r'^wallet_amt_'), group=3)
-    application.add_handler(CallbackQueryHandler(wallet_upload_start_card, pattern=r'^wallet_upload_start_card$'), group=3)
-    application.add_handler(CallbackQueryHandler(wallet_upload_start_crypto, pattern=r'^wallet_upload_start_crypto$'), group=3)
+    application.add_handler(CallbackQueryHandler(wallet_verify_gateway, pattern=r'^wallet_verify_gateway$'), group=3)
+
     # Unified upload router handles both wallet and reseller (run early to avoid other catch-alls)
     application.add_handler(MessageHandler(filters.PHOTO | filters.VOICE | filters.VIDEO | filters.AUDIO | filters.Document.ALL | filters.TEXT, composite_upload_router), group=0)
-    application.add_handler(CallbackQueryHandler(wallet_verify_gateway, pattern=r'^wallet_verify_gateway$'), group=3)
 
     # Reseller flows
     application.add_handler(CallbackQueryHandler(reseller_pay_start, pattern=r'^reseller_pay_start$'), group=3)
@@ -650,8 +656,37 @@ def build_application() -> Application:
         allow_reentry=True,
         per_message=False,
     )
-
     application.add_handler(admin_reply_conv, group=1)
+
+    wallet_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(wallet_topup_gateway_start, pattern=r'^wallet_topup_gateway$'),
+            CallbackQueryHandler(wallet_topup_card_start, pattern=r'^wallet_topup_card$'),
+            CallbackQueryHandler(wallet_topup_crypto_start, pattern=r'^wallet_topup_crypto$'),
+        ],
+        states={
+            WALLET_AWAIT_AMOUNT_GATEWAY: [
+                CallbackQueryHandler(wallet_select_amount, pattern=r'^wallet_amt_gateway_\d+$'),
+                CallbackQueryHandler(wallet_topup_custom_amount_start, pattern=r'^wallet_amt_gateway_custom$')
+            ],
+            WALLET_AWAIT_AMOUNT_CARD: [
+                CallbackQueryHandler(wallet_select_amount, pattern=r'^wallet_amt_card_\d+$'),
+                CallbackQueryHandler(wallet_topup_custom_amount_start, pattern=r'^wallet_amt_card_custom$')
+            ],
+            WALLET_AWAIT_AMOUNT_CRYPTO: [
+                CallbackQueryHandler(wallet_select_amount, pattern=r'^wallet_amt_crypto_\d+$'),
+                CallbackQueryHandler(wallet_topup_custom_amount_start, pattern=r'^wallet_amt_crypto_custom$')
+            ],
+            WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
+            WALLET_AWAIT_CUSTOM_AMOUNT_CARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
+            WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_topup_custom_amount_receive)],
+            WALLET_AWAIT_CARD_SCREENSHOT: [MessageHandler(filters.ALL & ~filters.COMMAND, composite_upload_router)],
+        },
+        fallbacks=[CallbackQueryHandler(wallet_menu, pattern='^wallet_menu$')],
+        allow_reentry=True,
+        per_message=False,
+    )
+    application.add_handler(wallet_conv, group=1)
 
     support_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(ticket_create_start, pattern=r'^ticket_create_start$')],
