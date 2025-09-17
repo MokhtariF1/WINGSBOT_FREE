@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 import re
 
@@ -13,11 +13,13 @@ from ..states import (
     ADMIN_PANEL_AWAIT_TOKEN,
     ADMIN_PANEL_AWAIT_USER,
     ADMIN_PANEL_AWAIT_PASS,
+    ADMIN_PANEL_AWAIT_DEFAULT_INBOUND,
     ADMIN_PANEL_INBOUNDS_MENU,
     ADMIN_PANEL_INBOUNDS_AWAIT_PROTOCOL,
     ADMIN_PANEL_INBOUNDS_AWAIT_TAG,
 )
 from ..helpers.tg import safe_edit_text as _safe_edit_text
+from ..panel import VpnPanelAPI as PanelAPI
 
 
 async def admin_panels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -147,32 +149,145 @@ async def admin_panel_receive_sub_base(update: Update, context: ContextTypes.DEF
 
 
 async def admin_panel_receive_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['new_panel']['user'] = update.message.text
-    await update.message.reply_text("رمز عبور (password) ادمین پنل را وارد کنید:")
+    context.user_data['new_panel']['user'] = update.message.text.strip()
+    await update.message.reply_text("رمز عبور پنل را وارد کنید:")
     return ADMIN_PANEL_AWAIT_PASS
+
+
+async def admin_panel_receive_pass(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives panel password, attempts to connect and fetch inbounds."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    
+    context.user_data['new_panel']['pass'] = update.message.text.strip()
+    panel_data = context.user_data['new_panel']
+
+    # Construct a temporary panel_row object for the API class
+    panel_row = {
+        'id': -1,  # Temporary ID
+        'panel_type': panel_data['type'],
+        'url': panel_data['url'],
+        'username': panel_data.get('user'),
+        'password': panel_data.get('pass'),
+        'token': panel_data.get('token'),
+        'sub_base': panel_data.get('sub_base'),
+    }
+
+    # Use the main PanelAPI to connect, but we need to select the correct class
+    # based on panel_type. The factory function is not available here, so we do it manually.
+    ptype = panel_data['type'].lower()
+    if ptype in ('xui', 'x-ui', 'alireza', 'sanaei'):
+        from ..panel import XuiAPI as PanelAPIType
+    elif ptype in ('3xui', '3x-ui'):
+        from ..panel import ThreeXuiAPI as PanelAPIType
+    elif ptype in ('txui', 'tx-ui', 'tx ui'):
+        from ..panel import TxUiAPI as PanelAPIType
+    else:
+        # Fallback or error for unsupported types
+        await update.message.reply_text(f"نوع پنل {ptype} برای اتصال مستقیم پشتیبانی نمی‌شود.")
+        return ConversationHandler.END
+
+    api = PanelAPIType(panel_row)
+
+    connecting_message = await update.message.reply_text("در حال اتصال به پنل و دریافت لیست اینباندها...")
+
+    # The list_inbounds() method in the panel API returns a tuple: (inbounds_list, message)
+    inbounds, msg = api.list_inbounds()
+
+    if not inbounds:
+        error_message = msg or "لیست اینباندها خالی است یا خطایی رخ داده است."
+        await connecting_message.edit_text(f"خطا در دریافت اینباندها: {error_message}")
+        return ConversationHandler.END
+    
+    context.user_data['new_panel_inbounds'] = inbounds
+    
+    text = "اتصال موفقیت‌آمیز بود. لطفاً اینباند پیش‌فرض برای ساخت سرویس را انتخاب کنید:\n\n"
+    keyboard = []
+    for inbound in inbounds:
+        # Use remark as the primary name, fallback to protocol and port
+        inbound_name = inbound.get('remark') or f"{inbound.get('protocol', '')}:{inbound.get('port', '')}"
+        text += f"- {inbound_name}\n"
+        keyboard.append([InlineKeyboardButton(inbound_name, callback_data=f"panel_inbound_{inbound['id']}")])
+
+    keyboard.append([InlineKeyboardButton("انصراف", callback_data="cancel")])
+    await connecting_message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    return ADMIN_PANEL_AWAIT_DEFAULT_INBOUND
+
+
+async def admin_panel_receive_default_inbound(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Saves the panel and the selected default inbound."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'cancel':
+        await query.edit_message_text("عملیات لغو شد.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    selected_inbound_id = int(query.data.split('_')[-1])
+    inbounds = context.user_data.get('new_panel_inbounds', [])
+
+    selected_inbound = None
+    for inbound in inbounds:
+        if inbound.get('id') == selected_inbound_id:
+            selected_inbound = inbound
+            break
+    
+    if not selected_inbound:
+        await query.edit_message_text("خطا: اینباند انتخاب شده یافت نشد. لطفاً دوباره تلاش کنید.")
+        return ConversationHandler.END
+
+    # Save panel and the selected inbound
+    panel_data = context.user_data['new_panel']
+    panel_id = execute_db(
+        "INSERT INTO panels (name, panel_type, url, sub_base, token, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            panel_data['name'],
+            panel_data['type'],
+            panel_data['url'],
+            panel_data.get('sub_base') or '',  # Ensure empty string instead of None
+            panel_data.get('token') or '',     # Ensure empty string instead of None
+            panel_data.get('user'),
+            panel_data.get('pass')
+        )
+    )
+    
+    if panel_id:
+        # Save the default inbound
+        protocol = selected_inbound.get('protocol', 'vless')
+        tag = selected_inbound.get('remark') or selected_inbound.get('tag', '')
+        inbound_id = selected_inbound.get('id') # Actual inbound ID from panel
+        inbound_row_id = execute_db("INSERT INTO panel_inbounds (panel_id, protocol, tag, inbound_id) VALUES (?, ?, ?, ?)", (panel_id, protocol, tag, inbound_id))
+
+        if inbound_row_id:
+            await query.edit_message_text("پنل و اینباند پیش‌فرض با موفقیت ذخیره شدند.")
+        else:
+            # If inbound fails to save, delete the panel to avoid orphaned data
+            execute_db("DELETE FROM panels WHERE id = ?", (panel_id,))
+            await query.edit_message_text("خطا در ذخیره اینباند پیش‌فرض در دیتابیس. پنل حذف شد.")
+    else:
+        await query.edit_message_text("خطا در ذخیره پنل در دیتابیس.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def admin_panel_save_no_inbound(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saves the panel directly without a default inbound."""
+    panel_data = context.user_data['new_panel']
+    execute_db(
+        "INSERT INTO panels (name, panel_type, url, sub_base, token, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (panel_data['name'], panel_data['type'], panel_data['url'], panel_data.get('sub_base'), panel_data.get('token'), panel_data.get('user'), panel_data.get('pass'))
+    )
+    context.user_data.clear()
 
 
 async def admin_panel_receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['new_panel']['token'] = update.message.text.strip()
     await update.message.reply_text("نام کاربری (username) ادمین پنل را وارد کنید:")
     return ADMIN_PANEL_AWAIT_USER
-
-
-async def admin_panel_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['new_panel']['pass'] = update.message.text
-    p = context.user_data['new_panel']
-    try:
-        execute_db(
-            "INSERT INTO panels (name, panel_type, url, username, password, sub_base, token) VALUES (?,?,?,?,?,?,?)",
-            (p['name'], p.get('type', 'marzban'), p['url'], p.get('user',''), p.get('pass',''), p.get('sub_base'), p.get('token')),
-        )
-        await update.message.reply_text("\u2705 پنل با موفقیت اضافه شد.")
-        context.user_data.clear()
-        return await admin_panels_menu(update, context)
-    except Exception as e:
-        await update.message.reply_text(f"خطا در ذخیره‌سازی: {e}")
-        context.user_data.clear()
-        return await admin_panels_menu(update, context)
 
 
 async def admin_panel_inbounds_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

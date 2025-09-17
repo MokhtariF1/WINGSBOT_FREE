@@ -204,6 +204,11 @@ async def dynamic_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 	query = update.callback_query
 	message_name = query.data
 
+	# Skip callbacks that are handled by stateful flows (e.g., purchase flow)
+	# Otherwise, this handler would re-edit the same message and override their UI
+	if message_name in ('buy_config_main',):
+		return
+
 	# First, check if the callback data corresponds to a dynamic message.
 	# This is safer than a blacklist of prefixes.
 	if query_db("SELECT 1 FROM messages WHERE message_name = ?", (message_name,), one=True):

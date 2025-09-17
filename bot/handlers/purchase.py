@@ -7,10 +7,10 @@ from telegram.error import BadRequest
 from ..db import query_db, execute_db
 from ..handlers.common import start_command
 from ..states import SELECT_PLAN, AWAIT_DISCOUNT_CODE, AWAIT_PAYMENT_SCREENSHOT, RENEW_AWAIT_PAYMENT, SELECT_PAYMENT_METHOD
-from ..config import NOBITEX_TOKEN, logger
-import requests
+from ..config import NOBITEX_TOKEN, logger, ADMIN_ID
 from ..helpers.tg import safe_edit_text as _safe_edit, ltr_code, notify_admins
 from ..helpers.flow import set_flow, clear_flow
+from .admin import auto_approve_wallet_order
 
 
 def _strike_text(text: str) -> str:
@@ -413,18 +413,48 @@ async def pay_method_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not plan_id:
         await query.message.edit_text("خطا: پلن انتخابی یافت نشد.")
         return ConversationHandler.END
+    # Create order first so we can attempt auto-approval on Sanaei/X-UI panels
     order_id = execute_db(
         "INSERT INTO orders (user_id, plan_id, timestamp, final_price, discount_code) VALUES (?, ?, ?, ?, ?)",
         (user.id, plan_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(final_price), discount_code),
     )
-    # Increment reseller usage if applicable
+
+    # Try auto-approval (for panels with default inbound configured)
+    auto_approved = False
     try:
-        r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
-        if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
-            execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
-            execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+        auto_approved = await auto_approve_wallet_order(order_id, context, user)
     except Exception:
-        pass
+        auto_approved = False
+
+    if auto_approved:
+        # On success: deduct balance and log transaction, mark reseller usage and apply referral bonus
+        execute_db("UPDATE user_wallets SET balance = balance - ? WHERE user_id = ?", (int(final_price), user.id))
+        execute_db(
+            "INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at) VALUES (?, ?, 'debit', 'wallet', 'approved', ?)",
+            (user.id, int(final_price), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        try:
+            r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
+            if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
+                execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
+                execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+        except Exception:
+            pass
+        try:
+            from .admin import _apply_referral_bonus
+            await _apply_referral_bonus(order_id, context)
+        except Exception:
+            pass
+        # Inform user balance
+        new_bal = (balance - int(final_price))
+        await query.message.edit_text(
+            f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
+        )
+        context.user_data.clear()
+        await start_command(update, context)
+        return ConversationHandler.END
+
+    # Fallback: auto-approval not possible -> proceed with manual admin approval, deduct as before
     plan = query_db("SELECT * FROM plans WHERE id = ?", (plan_id,), one=True)
     user_info = f"\U0001F464 **کاربر:** {user.mention_html()}\n\U0001F194 **آیدی:** `{user.id}`"
     plan_info = f"\U0001F4CB **پلن:** {plan['name']}"
@@ -438,12 +468,17 @@ async def pay_method_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [InlineKeyboardButton("\u274C رد درخواست", callback_data=f"reject_order_{order_id}")],
         ]),
     )
-    # Apply referral bonus immediately on wallet payment
     try:
         from .admin import _apply_referral_bonus
         await _apply_referral_bonus(order_id, context)
     except Exception:
         pass
+    # Deduct after sending to admin (keeps previous behavior where wallet was charged immediately)
+    execute_db("UPDATE user_wallets SET balance = balance - ? WHERE user_id = ?", (int(final_price), user.id))
+    execute_db(
+        "INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at) VALUES (?, ?, 'debit', 'wallet', 'approved', ?)",
+        (user.id, int(final_price), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
     new_bal = (balance - int(final_price))
     await query.message.edit_text(f"\u2705 پرداخت از کیف پول ثبت شد و برای تایید به ادمین ارسال شد.\nموجودی فعلی: {new_bal:,} تومان")
     context.user_data.clear()

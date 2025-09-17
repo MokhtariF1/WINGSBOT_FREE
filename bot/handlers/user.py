@@ -3,7 +3,7 @@ import requests, base64
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
-from telegram.ext import ContextTypes, ConversationHandler
+from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler, MessageHandler, filters
 
 from ..db import query_db, execute_db
 from ..utils import register_new_user
@@ -18,11 +18,13 @@ from ..states import (
     WALLET_AWAIT_CUSTOM_AMOUNT_CRYPTO,
     WALLET_AWAIT_CUSTOM_AMOUNT_GATEWAY,
     WALLET_AWAIT_CARD_SCREENSHOT,
+    WALLET_AWAIT_CRYPTO_SCREENSHOT,
 )
 from ..states import SUPPORT_AWAIT_TICKET
-from ..config import ADMIN_ID
-from ..helpers.tg import ltr_code, notify_admins
+from ..config import ADMIN_ID, logger
+from ..helpers.tg import ltr_code, notify_admins, safe_edit_text as _safe_edit_text
 from ..helpers.flow import set_flow, clear_flow
+from .admin import auto_approve_wallet_order
 import io
 try:
     import qrcode
@@ -946,7 +948,7 @@ async def wallet_select_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("ارسال اسکرین‌شات", callback_data='wallet_upload_start_crypto')], [InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]])
         await query.message.edit_text("\n\n".join(lines), reply_markup=kb)
         context.user_data.pop('wallet_prompt_msg_id', None)
-        return WALLET_AWAIT_CARD_SCREENSHOT
+        return WALLET_AWAIT_CRYPTO_SCREENSHOT
     return ConversationHandler.END
 
 
@@ -1362,7 +1364,7 @@ async def wallet_upload_start_crypto(update: Update, context: ContextTypes.DEFAU
     context.user_data['awaiting'] = 'wallet_upload'
     context.user_data['wallet_method'] = 'crypto'
     await query.message.edit_text("رسید/اسکرین‌شات یا هر پیامی مرتبط با پرداخت را ارسال کنید تا برای ادمین ارسال شود.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]]))
-    return WALLET_AWAIT_CARD_SCREENSHOT
+    return WALLET_AWAIT_CRYPTO_SCREENSHOT
 
 
 async def wallet_upload_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1495,7 +1497,7 @@ async def wallet_topup_custom_amount_receive(update: Update, context: ContextTyp
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("ارسال اسکرین‌شات", callback_data='wallet_upload_start_crypto')], [InlineKeyboardButton("\U0001F519 بازگشت", callback_data='wallet_menu')]])
         await update.message.reply_text("\n\n".join(lines), reply_markup=kb)
         context.user_data.pop('wallet_prompt_msg_id', None)
-        return WALLET_AWAIT_CARD_SCREENSHOT
+        return WALLET_AWAIT_CRYPTO_SCREENSHOT
     elif method == 'gateway':
         # This one is a bit different, it needs to be routed to show the gateway message
         dummy = type('obj', (object,), {'message': update.message})
@@ -1508,3 +1510,106 @@ async def wallet_topup_card_receive_amount(update: Update, context: ContextTypes
     if update.callback_query:
         await update.callback_query.answer("این دکمه غیرفعال است.", show_alert=True)
     return ConversationHandler.END
+
+async def purchase_method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    # ... existing code ...
+    if payment_method == 'wallet':
+        # Check balance
+        user_id = update.effective_user.id
+        balance = query_db("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,), one=True)
+        if not balance or balance['balance'] < plan['price']:
+            await query.answer("موجودی کیف پول شما کافی نیست.", show_alert=True)
+            return PURCHASE_AWAIT_PAYMENT_METHOD
+
+        # Create order first, but keep it in a special pending state
+        order_id = execute_db(
+            "INSERT INTO orders (user_id, plan_id, status, final_price, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user_id, plan['id'], 'pending_wallet', plan['price'], datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        if not order_id:
+            await query.edit_message_text("خطا در ثبت سفارش. لطفا دوباره تلاش کنید.")
+            return ConversationHandler.END
+
+        # Attempt auto-approval
+        auto_approved = await auto_approve_wallet_order(order_id, context, update.effective_user)
+
+        if auto_approved:
+            # On success, now we can deduct balance and log the transaction
+            new_balance = balance['balance'] - plan['price']
+            execute_db("UPDATE user_wallets SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+            execute_db(
+                "INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, -plan['price'], 'debit', 'wallet', 'approved', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            )
+            await query.edit_message_text(
+                f"پرداخت با موفقیت انجام شد. ✅ سرویس شما به صورت خودکار ایجاد و به حساب کاربری شما ارسال گردید.\n\n"
+                f"موجودی جدید: {new_balance:,} تومان"
+            )
+        else:
+            # On failure, notify admin for manual approval.
+            # The order is already in 'pending_wallet' state.
+            await query.edit_message_text(
+                f"پرداخت شما به مبلغ {plan['price']:,} تومان رزرو شد. "
+                f"در حال حاضر امکان ساخت خودکار سرویس وجود ندارد. سفارش شما برای تایید به ادمین ارسال شد و پس از تایید، مبلغ از حساب شما کسر خواهد شد."
+            )
+            admin_id = int(ADMIN_ID)
+            plan_name = plan['name']
+            user_info = update.effective_user.first_name
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ تایید و ساخت", callback_data=f"approve_auto_{order_id}"),
+                InlineKeyboardButton("❌ رد", callback_data=f"reject_{order_id}")
+            ]])
+            await context.bot.send_message(
+                admin_id,
+                f"⚠️ سفارش کیف پول نیازمند تایید دستی\n\n"
+                f"کاربر: {user_info}\n"
+                f"پلن: {plan_name}\n"
+                f"مبلغ: {plan['price']:,} تومان",
+                reply_markup=kb
+            )
+        
+        clear_flow(context)
+        return ConversationHandler.END
+
+    if payment_method == 'gateway':
+        settings = {s['key']: s['value'] for s in query_db("SELECT key, value FROM settings")}
+        # ... existing code ...
+
+async def purchase_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the purchase conversation, displaying available plans."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        plans = query_db("SELECT * FROM plans")
+        if not plans:
+            await query.edit_message_text("در حال حاضر پلنی برای فروش وجود ندارد.")
+            return ConversationHandler.END
+
+        text = "لطفا یکی از پلن‌های زیر را انتخاب کنید:"
+        keyboard = []
+        for plan in plans:
+            try:
+                # Defensive check for price to prevent crashes on bad data
+                price = int(plan.get('price', 0))
+                plan_name = f"\U0001F4E6 {plan['name']} - {price:,} تومان"
+                keyboard.append([InlineKeyboardButton(plan_name, callback_data=f"plan_{plan['id']}")])
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Skipping plan with invalid price. Plan ID: {plan.get('id')}. Error: {e}")
+                continue  # Skip this plan and log a warning
+
+        if not keyboard:
+            await query.edit_message_text("در حال حاضر پلنی برای فروش وجود ندارد (ممکن است اطلاعات پلن‌های موجود ناقص باشد).")
+            return ConversationHandler.END
+
+        keyboard.append([InlineKeyboardButton("بازگشت", callback_data="start_main")])
+
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return PURCHASE_AWAIT_PLAN
+    except Exception as e:
+        logger.error(f"Critical error in purchase_start: {e}", exc_info=True)
+        await query.edit_message_text("خطایی در نمایش پلن‌ها رخ داد. لطفا دوباره تلاش کنید.")
+        return ConversationHandler.END

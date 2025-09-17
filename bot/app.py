@@ -140,7 +140,8 @@ from .handlers.admin_panels import (
     admin_panel_receive_sub_base,
     admin_panel_receive_token,
     admin_panel_receive_user,
-    admin_panel_save,
+    admin_panel_receive_pass,
+    admin_panel_receive_default_inbound,
 )
 from .handlers.admin_messages import (
     admin_messages_menu as admin_messages_menu,
@@ -306,7 +307,8 @@ def build_application() -> Application:
             ADMIN_PANEL_AWAIT_SUB_BASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_receive_sub_base)],
             ADMIN_PANEL_AWAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_receive_token)],
             ADMIN_PANEL_AWAIT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_receive_user)],
-            ADMIN_PANEL_AWAIT_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_save)],
+            ADMIN_PANEL_AWAIT_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_receive_pass)],
+            ADMIN_PANEL_AWAIT_DEFAULT_INBOUND: [CallbackQueryHandler(admin_panel_receive_default_inbound, pattern=r'^panel_inbound_')],
             # Panel Inbounds Editor
             ADMIN_PANEL_INBOUNDS_MENU: [
                 CallbackQueryHandler(admin_panel_inbound_delete, pattern=r'^inbound_delete_\d+$'),

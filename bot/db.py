@@ -184,6 +184,15 @@ def db_setup():
                 cursor.execute("ALTER TABLE panels ADD COLUMN token TEXT")
             except sqlite3.Error as e:
                 logger.error(f"Error adding token to panels: {e}")
+        # Migrations for panel_inbounds
+        cursor.execute("PRAGMA table_info(panel_inbounds)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'inbound_id' not in columns:
+            try:
+                cursor.execute("ALTER TABLE panel_inbounds ADD COLUMN inbound_id INTEGER")
+            except sqlite3.Error as e:
+                logger.error(f"Error adding inbound_id to panel_inbounds: {e}")
+
         # --- NEW: Table for manually setting inbounds for each panel ---
         cursor.execute(
             """
@@ -192,6 +201,7 @@ def db_setup():
                 panel_id INTEGER NOT NULL,
                 protocol TEXT NOT NULL,
                 tag TEXT NOT NULL,
+                inbound_id INTEGER,
                 UNIQUE(panel_id, tag),
                 FOREIGN KEY (panel_id) REFERENCES panels(id) ON DELETE CASCADE
             )

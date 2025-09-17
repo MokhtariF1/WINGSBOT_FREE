@@ -7,13 +7,15 @@ import base64
 import requests
 import json as _json
 from urllib.parse import urlsplit, quote as _urlquote
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, User
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import TelegramError, Forbidden, BadRequest
 from telegram.ext import ContextTypes, ConversationHandler, ApplicationHandlerStop, MessageHandler
 from telegram.ext import filters
 from html import escape as html_escape
 import re
+import time
+from uuid import uuid4
 
 from ..config import ADMIN_ID, logger
 from ..db import query_db, execute_db
@@ -3539,3 +3541,217 @@ async def admin_set_trial_panel_choose(update: Update, context: ContextTypes.DEF
     execute_db("UPDATE settings SET value = ? WHERE key = 'free_trial_panel_id'", (value,))
     await query.answer("ذخیره شد", show_alert=True)
     return await admin_settings_manage(update, context)
+
+
+async def auto_approve_wallet_order(order_id: int, context: ContextTypes.DEFAULT_TYPE, user: User) -> bool:
+    """
+    Attempts to automatically approve an order paid by wallet.
+    Finds a suitable x-ui/3x-ui panel, creates the user on its default inbound,
+    and sends the config to the user.
+    Returns True on success, False on failure.
+    """
+    try:
+        order = query_db("SELECT * FROM orders WHERE id = ?", (order_id,), one=True)
+        if not order:
+            return False
+
+        plan = query_db("SELECT * FROM plans WHERE id = ?", (order['plan_id'],), one=True)
+        if not plan:
+            return False
+
+        # Find a suitable panel that has a default inbound configured
+        xui_panel_types = ("'xui'", "'x-ui'", "'sanaei'", "'alireza'", "'3xui'", "'3x-ui'", "'txui'", "'tx-ui'")
+        type_list_sql = f"({', '.join(xui_panel_types)})"
+        row = query_db(
+            f"""
+            SELECT p.*, pi.id AS pi_id, pi.inbound_id AS default_inbound_id, pi.protocol AS default_protocol, pi.tag AS default_tag
+            FROM panels p
+            JOIN panel_inbounds pi ON pi.panel_id = p.id
+            WHERE p.panel_type IN {type_list_sql}
+            ORDER BY pi.inbound_id IS NULL, pi.id
+            """,
+            one=True,
+        )
+        if not row:
+            return False
+
+        panel_row = {k: row[k] for k in row.keys() if k in ('id','panel_type','url','username','password','token','sub_base','name')}
+        default_inbound_id = row.get('default_inbound_id')
+        default_protocol = row.get('default_protocol')
+        default_tag = row.get('default_tag')
+        pi_id = row.get('pi_id')
+
+        # Instantiate Panel API
+        ptype = panel_row['panel_type'].lower()
+        PanelAPIType = None
+        if ptype in ('xui', 'x-ui', 'alireza', 'sanaei'):
+            from ..panel import XuiAPI as PanelAPIType
+        elif ptype in ('3xui', '3x-ui'):
+            from ..panel import ThreeXuiAPI as PanelAPIType
+        elif ptype in ('txui', 'tx-ui', 'tx ui'):
+            from ..panel import TxUiAPI as PanelAPIType
+        
+        if not PanelAPIType:
+            return False
+        
+        api = PanelAPIType(panel_row)
+
+        # Resolve inbound id if missing by matching tag/protocol from panel
+        inbound_id = default_inbound_id
+        if not inbound_id:
+            try:
+                inbounds, _ = api.list_inbounds()
+            except Exception:
+                inbounds = []
+            if inbounds:
+                cand = None
+                for ib in inbounds:
+                    tag = ib.get('remark') or ib.get('tag')
+                    proto = (ib.get('protocol') or '').lower()
+                    if tag == default_tag or (default_protocol and proto == (default_protocol or '').lower() and tag):
+                        cand = ib
+                        break
+                inbound_id = cand.get('id') if cand else None
+                if inbound_id:
+                    try:
+                        execute_db("UPDATE panel_inbounds SET inbound_id = ? WHERE id = ?", (int(inbound_id), int(pi_id)))
+                    except Exception:
+                        pass
+        if not inbound_id:
+            return False
+
+        # Create user on inbound using panel helper
+        username_created, sub_link, message = api.create_user_on_inbound(int(inbound_id), order['user_id'], plan)
+        if not (username_created and sub_link):
+            logger.error(f"Auto-approve failed for order {order_id}: {message}")
+            return False
+        
+        # Update order in DB
+        execute_db(
+            "UPDATE orders SET status = ?, marzban_username = ?, xui_inbound_id = ?, xui_client_id = ?, last_link = ?, panel_id = ?, panel_type = ? WHERE id = ?",
+            (
+                'approved',
+                username_created,
+                int(inbound_id),
+                '',
+                sub_link,
+                panel_row['id'],
+                panel_row['panel_type'],
+                order_id
+            )
+        )
+
+        # Build config(s) similar to admin approval flow
+        panel_full = query_db("SELECT * FROM panels WHERE id = ?", (panel_row['id'],), one=True) or panel_row
+        inbound_detail = getattr(api, '_fetch_inbound_detail', lambda _id: None)(int(inbound_id))
+        built_confs = []
+        if inbound_detail:
+            try:
+                built_confs = _build_configs_from_inbound(inbound_detail, username_created, panel_full) or []
+            except Exception:
+                built_confs = []
+        # If none, try decoding subscription content
+        if not built_confs:
+            built_confs = _fetch_subscription_configs(sub_link)
+        # As extra attempt: use API helper if available
+        api_confs = []
+        if not built_confs and hasattr(api, 'get_configs_for_user_on_inbound'):
+            try:
+                api_confs = api.get_configs_for_user_on_inbound(int(inbound_id), username_created) or []
+            except Exception:
+                api_confs = []
+        display_confs = built_confs or api_confs
+
+        # Footer and message composition
+        footer_row = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
+        footer_text = (footer_row.get('value') if footer_row else '') or ''
+        sub_abs = sub_link
+        try:
+            if sub_abs and not sub_abs.startswith('http'):
+                sub_abs = f"{api.base_url}{sub_abs}"
+        except Exception:
+            pass
+        if display_confs:
+            preview = display_confs[:1]
+            configs_text = "\n".join(preview)
+            sub_line = f"\n<b>لینک ساب:</b>\n<code>{sub_abs}</code>\n" if sub_abs else ""
+            message_text = (
+                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+                f"<b>کانفیگ شما:</b>\n<code>{configs_text}</code>{sub_line}\n" + footer_text
+            )
+        else:
+            message_text = (
+                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+                f"<b>لینک اشتراک شما:</b>\n<code>{sub_abs}</code>\n\n" + footer_text
+            )
+        await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
+        
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in auto_approve_wallet_order for order {order_id}: {e}")
+        return False
+
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    settings = {s['key']: s['value'] for s in query_db("SELECT key, value FROM settings")}
+    trial_status = settings.get('free_trial_status', '0')
+    trial_button_text = "\u274C غیرفعال کردن تست" if trial_status == '1' else "\u2705 فعال کردن تست"
+    trial_button_callback = "set_trial_status_0" if trial_status == '1' else "set_trial_status_1"
+
+    usd_manual = settings.get('usd_irt_manual') or 'تنظیم نشده'
+    usd_cached = settings.get('usd_irt_cached') or '-'
+    usd_mode = (settings.get('usd_irt_mode') or 'manual').lower()
+    mode_title = 'API' if usd_mode == 'api' else 'دستی'
+    next_mode = 'manual' if usd_mode == 'api' else 'api'
+
+    pay_card = settings.get('pay_card_enabled', '1') == '1'
+    pay_crypto = settings.get('pay_crypto_enabled', '1') == '1'
+    pay_gateway = settings.get('pay_gateway_enabled', '0') == '1'
+    gateway_type = (settings.get('gateway_type') or 'zarinpal').lower()
+    sb_enabled = settings.get('signup_bonus_enabled', '0') == '1'
+    sb_amount = int((settings.get('signup_bonus_amount') or '0') or 0)
+    trial_panel_id = (settings.get('free_trial_panel_id') or '').strip()
+    panels = query_db("SELECT id, name FROM panels ORDER BY id") or []
+    trial_panel_name = next((p['name'] for p in panels if str(p['id']) == trial_panel_id), 'پیش‌فرض')
+    ref_percent = int((settings.get('referral_commission_percent') or '10') or 10)
+
+    text = (
+        f"\u2699\uFE0F **تنظیمات کلی ربات**\n\n"
+        f"**وضعیت تست:** {'فعال' if trial_status == '1' else 'غیرفعال'}\n"
+        f"**روز تست:** `{settings.get('free_trial_days', '1')}` | **حجم تست:** `{settings.get('free_trial_gb', '0.2')} GB`\n\n"
+        f"**پنل ساخت تست:** `{trial_panel_name}`\n\n"
+        f"**درصد کمیسیون معرفی:** `{ref_percent}%`\n\n"
+        f"**نرخ دلار:** `{usd_manual}`\n"
+        f"**آخرین نرخ کش‌شده:** `{usd_cached}`\n"
+        f"**حالت نرخ دلار:** `{mode_title}`\n\n"
+        f"**پرداخت‌ها:**\n"
+        f"- کارت به کارت: {'فعال' if pay_card else 'غیرفعال'}\n"
+        f"- رمزارز: {'فعال' if pay_crypto else 'غیرفعال'}\n"
+        f"- درگاه پرداخت: {'فعال' if pay_gateway else 'غیرفعال'} ({'زرین‌پال' if gateway_type=='zarinpal' else 'آقای پرداخت'})\n"
+        f"\n**موجودی اولیه هدیه:** {'فعال' if sb_enabled else 'غیرفعال'} | مبلغ: `{sb_amount:,}` تومان\n"
+        f"\n**متن زیر کانفیگ:**\n{_md_escape((settings.get('config_footer_text') or '').strip()) or '-'}\n"
+        f"برای تغییر:\n`/setms`\n`متن_جدید`\n"
+    )
+    keyboard = [
+        [InlineKeyboardButton(trial_button_text, callback_data=trial_button_callback)],
+        [InlineKeyboardButton("روز/حجم تست", callback_data="set_trial_days"), InlineKeyboardButton("ویرایش متن پرداخت", callback_data="set_payment_text")],
+        [InlineKeyboardButton("انتخاب پنل ساخت تست", callback_data="set_trial_panel_start")],
+        [InlineKeyboardButton("اینباند کانفیگ تست", callback_data="set_trial_inbound_start")],
+        [InlineKeyboardButton("تنظیم درصد کمیسیون معرفی", callback_data="set_ref_percent_start")],
+        [InlineKeyboardButton("\U0001F4B3 مدیریت کارت‌ها", callback_data="admin_cards_menu"), InlineKeyboardButton("\U0001F4B0 مدیریت ولت‌ها", callback_data="admin_wallets_menu")],
+        [InlineKeyboardButton("\U0001F4B8 درخواست‌های شارژ کیف پول", callback_data="admin_wallet_tx_menu")],
+        [InlineKeyboardButton("\U0001F4B5 تنظیمات نمایندگی", callback_data="admin_reseller_menu")],
+        [InlineKeyboardButton("\U0001F4B1 تنظیم نرخ دلار", callback_data="set_usd_rate_start"), InlineKeyboardButton("\U0001F504 تغییر حالت نرخ: " + ("به دستی" if next_mode=='manual' else "به API"), callback_data=f"toggle_usd_mode_{next_mode}")],
+        [InlineKeyboardButton(("غیرفعال کردن کارت" if pay_card else "فعال کردن کارت"), callback_data=f"toggle_pay_card_{0 if pay_card else 1}"), InlineKeyboardButton(("غیرفعال کردن رمزارز" if pay_crypto else "فعال کردن رمزارز"), callback_data=f"toggle_pay_crypto_{0 if pay_crypto else 1}")],
+        [InlineKeyboardButton(("غیرفعال کردن درگاه" if pay_gateway else "فعال کردن درگاه"), callback_data=f"toggle_pay_gateway_{0 if pay_gateway else 1}"), InlineKeyboardButton(("زرین‌پال" if gateway_type!='zarinpal' else "آقای پرداخت"), callback_data=f"toggle_gateway_type_{'zarinpal' if gateway_type!='zarinpal' else 'aghapay'}")],
+        [InlineKeyboardButton(("غیرفعال کردن هدیه ثبت‌نام" if sb_enabled else "فعال کردن هدیه ثبت‌نام"), callback_data=f"toggle_signup_bonus_{0 if sb_enabled else 1}"), InlineKeyboardButton("تنظیم مبلغ هدیه ثبت‌نام", callback_data="set_signup_bonus_amount")],
+        [InlineKeyboardButton("\U0001F519 بازگشت", callback_data="admin_main")],
+    ]
+    if query:
+        await _safe_edit_text(query.message, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    return SETTINGS_MENU
