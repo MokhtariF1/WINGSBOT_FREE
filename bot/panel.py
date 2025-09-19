@@ -4132,6 +4132,7 @@ class NeticoAPI(BasePanelAPI):
         
         # Generate random username and password
         new_username = f"user_{user_id}_{uuid.uuid4().hex[:6]}"
+        import random
         new_password = ''.join([str(random.randint(0, 9)) for _ in range(4)])  # 4-digit password
         
         # Get traffic and duration from plan
