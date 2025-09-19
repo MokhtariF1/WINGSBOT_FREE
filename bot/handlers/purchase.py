@@ -427,41 +427,32 @@ async def pay_method_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     if netico_panel:
         # For Netico panels, always try to create service directly
-        try:
-            auto_approved = await auto_approve_wallet_order(order_id, context, user)
-            if auto_approved:
-                # On success: mark reseller usage and apply referral bonus
-                try:
-                    r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
-                    if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
-                        execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
-                        execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
-                except Exception:
-                    pass
-                try:
-                    from .admin import _apply_referral_bonus
-                    await _apply_referral_bonus(order_id, context)
-                except Exception:
-                    pass
-                # Inform user balance
-                new_bal = (balance - int(final_price))
-                await query.message.edit_text(
-                    f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
-                )
-                context.user_data.clear()
-                await start_command(update, context)
-                return ConversationHandler.END
-            else:
-                # If Netico service creation failed, inform the user
-                execute_db("DELETE FROM orders WHERE id = ?", (order_id,))
-                await query.message.edit_text(
-                    f"\u26A0\uFE0F خطا در ایجاد سرویس. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
-                )
-                context.user_data.clear()
-                await start_command(update, context)
-                return ConversationHandler.END
-        except Exception as e:
-            logger.error(f"Error creating Netico service: {str(e)}")
+        # try:
+        auto_approved = await auto_approve_wallet_order(order_id, context, user)
+        if auto_approved:
+            # On success: mark reseller usage and apply referral bonus
+            try:
+                r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
+                if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
+                    execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
+                    execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+            except Exception:
+                pass
+            try:
+                from .admin import _apply_referral_bonus
+                await _apply_referral_bonus(order_id, context)
+            except Exception:
+                pass
+            # Inform user balance
+            new_bal = (balance - int(final_price))
+            await query.message.edit_text(
+                f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
+            )
+            context.user_data.clear()
+            await start_command(update, context)
+            return ConversationHandler.END
+        else:
+            # If Netico service creation failed, inform the user
             execute_db("DELETE FROM orders WHERE id = ?", (order_id,))
             await query.message.edit_text(
                 f"\u26A0\uFE0F خطا در ایجاد سرویس. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
@@ -469,6 +460,15 @@ async def pay_method_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             context.user_data.clear()
             await start_command(update, context)
             return ConversationHandler.END
+        # except Exception as e:
+        #     logger.error(f"Error creating Netico service: {str(e)}")
+        #     execute_db("DELETE FROM orders WHERE id = ?", (order_id,))
+        #     await query.message.edit_text(
+        #         f"\u26A0\uFE0F خطا در ایجاد سرویس. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
+        #     )
+        #     context.user_data.clear()
+        #     await start_command(update, context)
+        #     return ConversationHandler.END
     else:
         # For other panel types, try auto-approval
         auto_approved = False
