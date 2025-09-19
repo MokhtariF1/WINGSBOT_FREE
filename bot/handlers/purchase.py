@@ -419,66 +419,102 @@ async def pay_method_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         (user.id, plan_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(final_price), discount_code),
     )
 
-    # Try auto-approval (for panels with default inbound configured)
-    auto_approved = False
-    try:
-        auto_approved = await auto_approve_wallet_order(order_id, context, user)
-    except Exception:
+    # Check if there's a Netico panel first
+    netico_panel = query_db(
+        "SELECT * FROM panels WHERE panel_type = 'netico' LIMIT 1",
+        one=True
+    )
+    
+    if netico_panel:
+        # For Netico panels, always try to create service directly
+        try:
+            auto_approved = await auto_approve_wallet_order(order_id, context, user)
+            if auto_approved:
+                # On success: mark reseller usage and apply referral bonus
+                try:
+                    r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
+                    if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
+                        execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
+                        execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+                except Exception:
+                    pass
+                try:
+                    from .admin import _apply_referral_bonus
+                    await _apply_referral_bonus(order_id, context)
+                except Exception:
+                    pass
+                # Inform user balance
+                new_bal = (balance - int(final_price))
+                await query.message.edit_text(
+                    f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
+                )
+                context.user_data.clear()
+                await start_command(update, context)
+                return ConversationHandler.END
+            else:
+                # If Netico service creation failed, inform the user
+                execute_db("DELETE FROM orders WHERE id = ?", (order_id,))
+                await query.message.edit_text(
+                    f"\u26A0\uFE0F خطا در ایجاد سرویس. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
+                )
+                context.user_data.clear()
+                await start_command(update, context)
+                return ConversationHandler.END
+        except Exception as e:
+            logger.error(f"Error creating Netico service: {str(e)}")
+            execute_db("DELETE FROM orders WHERE id = ?", (order_id,))
+            await query.message.edit_text(
+                f"\u26A0\uFE0F خطا در ایجاد سرویس. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
+            )
+            context.user_data.clear()
+            await start_command(update, context)
+            return ConversationHandler.END
+    else:
+        # For other panel types, try auto-approval
         auto_approved = False
-
-    if auto_approved:
-        # On success: deduct balance and log transaction, mark reseller usage and apply referral bonus
-        execute_db("UPDATE user_wallets SET balance = balance - ? WHERE user_id = ?", (int(final_price), user.id))
-        execute_db(
-            "INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at) VALUES (?, ?, 'debit', 'wallet', 'approved', ?)",
-            (user.id, int(final_price), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
         try:
-            r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
-            if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
-                execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
-                execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+            auto_approved = await auto_approve_wallet_order(order_id, context, user)
         except Exception:
-            pass
-        try:
-            from .admin import _apply_referral_bonus
-            await _apply_referral_bonus(order_id, context)
-        except Exception:
-            pass
-        # Inform user balance
-        new_bal = (balance - int(final_price))
-        await query.message.edit_text(
-            f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
-        )
-        context.user_data.clear()
-        await start_command(update, context)
-        return ConversationHandler.END
+            auto_approved = False
 
-    # Fallback: auto-approval not possible -> proceed with manual admin approval, deduct as before
-    plan = query_db("SELECT * FROM plans WHERE id = ?", (plan_id,), one=True)
-    user_info = f"\U0001F464 **کاربر:** {user.mention_html()}\n\U0001F194 **آیدی:** `{user.id}`"
-    plan_info = f"\U0001F4CB **پلن:** {plan['name']}"
-    price_info = f"\U0001F4B0 **مبلغ پرداختی:** {int(final_price):,} تومان\n\U0001F4B3 **روش:** کیف پول"
-    await notify_admins(context.bot,
-        text=(f"\U0001F514 **درخواست خرید جدید** (سفارش #{order_id})\n\n{user_info}\n\n{plan_info}\n{price_info}\n\nلطفا نتیجه را اعلام کنید:"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("\u2705 تأیید و ارسال خودکار", callback_data=f"approve_auto_{order_id}")],
-            [InlineKeyboardButton("\U0001F4DD تأیید و ارسال دستی", callback_data=f"approve_manual_{order_id}")],
-            [InlineKeyboardButton("\u274C رد درخواست", callback_data=f"reject_order_{order_id}")],
-        ]),
-    )
-    try:
-        from .admin import _apply_referral_bonus
-        await _apply_referral_bonus(order_id, context)
-    except Exception:
-        pass
-    # Deduct after sending to admin (keeps previous behavior where wallet was charged immediately)
-    execute_db("UPDATE user_wallets SET balance = balance - ? WHERE user_id = ?", (int(final_price), user.id))
-    execute_db(
-        "INSERT INTO wallet_transactions (user_id, amount, direction, method, status, created_at) VALUES (?, ?, 'debit', 'wallet', 'approved', ?)",
-        (user.id, int(final_price), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    )
+        if auto_approved:
+            # On success: mark reseller usage and apply referral bonus
+            try:
+                r = query_db("SELECT max_purchases, used_purchases FROM resellers WHERE user_id = ?", (user.id,), one=True)
+                if r and int(r.get('used_purchases') or 0) < int(r.get('max_purchases') or 0):
+                    execute_db("UPDATE resellers SET used_purchases = used_purchases + 1 WHERE user_id = ?", (user.id,))
+                    execute_db("UPDATE orders SET reseller_applied = 1 WHERE id = ?", (order_id,))
+            except Exception:
+                pass
+            try:
+                from .admin import _apply_referral_bonus
+                await _apply_referral_bonus(order_id, context)
+            except Exception:
+                pass
+            # Inform user balance
+            new_bal = (balance - int(final_price))
+            await query.message.edit_text(
+                f"\u2705 پرداخت با کیف پول انجام شد و سرویس به صورت خودکار ساخته و ارسال شد.\nموجودی فعلی: {new_bal:,} تومان"
+            )
+            context.user_data.clear()
+            await start_command(update, context)
+            return ConversationHandler.END
+
+        # Fallback: auto-approval not possible -> proceed with manual admin approval
+        plan = query_db("SELECT * FROM plans WHERE id = ?", (plan_id,), one=True)
+        user_info = f"\U0001F464 **کاربر:** {user.mention_html()}\n\U0001F194 **آیدی:** `{user.id}`"
+        plan_info = f"\U0001F4CB **پلن:** {plan['name']}"
+        price_info = f"\U0001F4B0 **مبلغ پرداختی:** {int(final_price):,} تومان\n\U0001F4B3 **روش:** کیف پول"
+        await notify_admins(context.bot,
+            text=(f"\U0001F514 **درخواست خرید جدید** (سفارش #{order_id})\n\n{user_info}\n\n{plan_info}\n{price_info}\n\nلطفا نتیجه را اعلام کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("\u2705 تأیید و ارسال خودکار", callback_data=f"approve_auto_{order_id}")],
+                [InlineKeyboardButton("\U0001F4DD تأیید و ارسال دستی", callback_data=f"approve_manual_{order_id}")],
+                [InlineKeyboardButton("\u274C رد درخواست", callback_data=f"reject_order_{order_id}")],
+            ]),
+        )
+    # Deduct balance and log transaction already happened at the beginning of the function
     new_bal = (balance - int(final_price))
     await query.message.edit_text(f"\u2705 پرداخت از کیف پول ثبت شد و برای تایید به ادمین ارسال شد.\nموجودی فعلی: {new_bal:,} تومان")
     context.user_data.clear()
