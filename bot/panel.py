@@ -3886,17 +3886,19 @@ class NeticoAPI(BasePanelAPI):
             if not username and user_id:
                 # ایجاد نام کاربری بر اساس شناسه کاربر
                 username = f"user{user_id}_{int(datetime.now().timestamp())}"
-            
+                print(username)
             # تعیین ترافیک و مدت زمان
             if plan:
                 traffic_gb = float(plan.get('traffic_gb', 0))
                 duration_days = int(plan.get('duration_days', 0))
-            
+                print("traffic duration", traffic_gb, duration_days)
             # اولویت با پارامترهای مستقیم
             if traffic_limit is not None:
                 traffic_gb = float(traffic_limit)
+                print("traffic limit", traffic_gb)
             if days is not None:
                 duration_days = int(days)
+                print("days", duration_days)
                 
             # ایجاد رمز عبور تصادفی
             import random
@@ -3910,6 +3912,7 @@ class NeticoAPI(BasePanelAPI):
                 'days': duration_days,
                 'agent_id': self.agent_id
             }
+            print(create_data)
             
             # اضافه کردن پارامترهای اختیاری
             if kwargs.get('password'):
@@ -4094,31 +4097,52 @@ class NeticoAPI(BasePanelAPI):
             
         try:
             login_url = f"{self.base_url}/login_db.php"
-            login_data = {
-                'username': self.username,
-                'password': self.password
-            }
+            
+            # Create multipart/form-data for login
+            from requests_toolbelt.multipart.encoder import MultipartEncoder
+            
+            multipart_data = MultipartEncoder(
+                fields={
+                    'username': self.username,
+                    'password': self.password
+                }
+            )
             
             headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Content-Type': multipart_data.content_type,
+                'Origin': self.base_url,
+                'Referer': f"{self.base_url}/login.php",
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1'
             }
+            
+            logger.info(f"Attempting to login to Netico panel: {login_url}")
             
             r = self.session.post(
                 login_url,
-                data=login_data,
+                data=multipart_data,
                 headers=headers,
-                timeout=10
             )
             
             r.raise_for_status()
             
+            # Log cookies for debugging
+            logger.info(f"Received cookies: {dict(self.session.cookies)}")
+            
             # Check if login was successful by verifying cookies
             if 'PHPSESSID' in self.session.cookies:
                 self.cookies = self.session.cookies
+                logger.info(f"Successfully logged in to Netico panel. PHPSESSID obtained.")
                 return True
             else:
-                logger.error(f"Failed to login to Netico panel: No session cookie received")
+                logger.error(f"Failed to login to Netico panel: No PHPSESSID cookie received")
                 return False
                 
         except requests.RequestException as e:
@@ -4149,61 +4173,106 @@ class NeticoAPI(BasePanelAPI):
         try:
             create_url = f"{self.base_url}/add_userPro.php?add"
             
-            # Prepare form data
-            form_data = {
-                'user_id': '',  # Empty as per example
-                'username': new_username,
-                'password': new_password,
-                'total': str(int(traffic_gb)),  # Convert to integer
-                'date': str(date_value),
-                'op_multi': str(multi_user),
-                'op_agents': self.agent_id,
-                'submit': ''  # Empty as per example
-            }
+            # Prepare form data for multipart/form-data with exact boundary format
+            import requests
+            from requests_toolbelt.multipart.encoder import MultipartEncoder
+            import uuid
             
-            # Prepare headers
+            # Generate a fixed boundary format as per example
+            boundary = f"----geckoformboundary{uuid.uuid4().hex[:32]}"
+            
+            # Prepare form data exactly as specified
+            multipart_data = MultipartEncoder(
+                fields={
+                    'user_id': '',  # Empty as per example
+                    'username': new_username,
+                    'password': new_password,
+                    'total': str(int(traffic_gb)),  # Convert to integer GB
+                    'date': str(date_value),
+                    'op_multi': str(multi_user),
+                    'op_agents': self.agent_id,
+                    'submit': ''  # Empty as per example
+                },
+                boundary=boundary.replace('----', '')  # Remove prefix for internal use
+            )
+            
+            # Log the form data for debugging
+            logger.info(f"Netico create_user form data: username={new_username}, password={new_password}, total={int(traffic_gb)}, date={date_value}, op_multi={multi_user}, op_agents={self.agent_id}")
+            
+            # Prepare headers exactly as specified in the example
             headers = {
-                'Content-Type': 'multipart/form-data',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+                'Host': self.base_url.replace('https://', ''),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'Origin': self.base_url,
+                'Connection': 'keep-alive',
+                'Referer': create_url,
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Priority': 'u=0, i'
             }
             
-            # Send request
+            # Log the request URL, headers and cookies
+            logger.info(f"Sending request to Netico panel: {create_url}")
+            logger.info(f"Request headers: {headers}")
+            logger.info(f"Request cookies: {self.cookies}")
+            
+            # Send request with cookies
             r = self.session.post(
                 create_url,
-                data=form_data,
+                data=multipart_data,
                 headers=headers,
-                timeout=15
+                cookies=self.cookies,
             )
+            
+            # Log the response status and preview
+            logger.info(f"Netico response status: {r.status_code}")
+            logger.info(f"Netico response preview: {r.text[:200]}")
             
             r.raise_for_status()
             
-            # Store user information in our database for future reference
-            # Since we don't have API to check user status, we need to store this info
-            current_time = int(datetime.now().timestamp())
-            expire_time = int((datetime.now() + timedelta(days=duration_days)).timestamp())
-            
-            user_data = {
-                'panel_id': self.panel_id,
-                'user_id': user_id,
-                'panel_username': new_username,
-                'panel_password': new_password,
-                'traffic_limit': int(traffic_gb * 1024 * 1024 * 1024),  # Convert GB to bytes
-                'created_at': current_time,
-                'expire_at': expire_time,
-                'multi_user': multi_user
-            }
-            
-            # Insert into user_services table (assuming this table exists)
-            query_db(
-                "INSERT INTO user_services (panel_id, user_id, panel_username, panel_password, traffic_limit, created_at, expire_at, multi_user) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.panel_id, user_id, new_username, new_password, user_data['traffic_limit'], current_time, expire_time, multi_user)
-            )
-            
-            # Return username, connection info, and status
-            connection_info = f"نام کاربری: {new_username}\nرمز عبور: {new_password}\nحجم: {traffic_gb} گیگابایت\nمدت: {duration_days} روز\nتعداد کاربر همزمان: {multi_user}"
-            
-            logger.info(f"Successfully created Netico user: {new_username}")
-            return new_username, connection_info, "Success"
+            # Netico returns HTML response, not JSON
+            # Check if the response indicates success
+            if r.status_code == 200:
+                # Store user information in our database for future reference
+                # Since we don't have API to check user status, we need to store this info
+                current_time = int(datetime.now().timestamp())
+                expire_time = int((datetime.now() + timedelta(days=duration_days)).timestamp())
+                
+                user_data = {
+                    'panel_id': self.panel_id,
+                    'user_id': user_id,
+                    'panel_username': new_username,
+                    'panel_password': new_password,
+                    'traffic_limit': int(traffic_gb * 1024 * 1024 * 1024),  # Convert GB to bytes
+                    'created_at': current_time,
+                    'expire_at': expire_time,
+                    'multi_user': multi_user
+                }
+                
+                # Create connection info string
+                connection_info = f"نام کاربری: {new_username}\nرمز عبور: {new_password}\nحجم: {traffic_gb} گیگابایت\nمدت: {duration_days} روز\nتعداد کاربر همزمان: {multi_user}"
+                
+                # Insert into user_services table with connection_info
+                query_db(
+                    "INSERT INTO user_services (panel_id, user_id, panel_username, panel_password, connection_info, traffic_limit, created_at, expire_at, multi_user) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.panel_id, user_id, new_username, new_password, connection_info, user_data['traffic_limit'], current_time, expire_time, multi_user)
+                )
+                
+                # Log success message
+                logger.info(f"Successfully created Netico user: {new_username}")
+                return new_username, connection_info, "Success"
+            else:
+                
+                # logger.error(f"Failed to create user in Netico panel: {error_message}")
+                # logger.error(f"Response content: {r.text[:500]}")
+                return None, None
             
         except requests.RequestException as e:
             logger.error(f"Failed to create new user in Netico panel: {e}")
@@ -4348,3 +4417,4 @@ def VpnPanelAPI(panel_id: int) -> BasePanelAPI:
         return NeticoAPI(panel_row)
     logger.error(f"Unknown panel type '{ptype}' for panel {panel_row['name']}")
     return MarzbanAPI(panel_row)
+    

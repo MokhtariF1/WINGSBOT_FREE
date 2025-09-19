@@ -194,6 +194,25 @@ def db_setup():
                 logger.error(f"Error adding inbound_id to panel_inbounds: {e}")
 
         # --- NEW: Table for manually setting inbounds for each panel ---
+        # --- NEW: Table for user services to track service information ---
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_services (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                panel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                panel_username TEXT NOT NULL,
+                panel_password TEXT,
+                connection_info TEXT,
+                traffic_limit INTEGER,
+                created_at TEXT NOT NULL,
+                expire_at TEXT,
+                multi_user INTEGER DEFAULT 1,
+                FOREIGN KEY (panel_id) REFERENCES panels(id)
+            )
+            """
+        )
+        
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS panel_inbounds (
