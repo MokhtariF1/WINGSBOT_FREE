@@ -16,7 +16,7 @@ from html import escape as html_escape
 import re
 import time
 from uuid import uuid4
-
+import random
 from ..config import ADMIN_ID, logger
 from ..db import query_db, execute_db
 from ..panel import VpnPanelAPI
