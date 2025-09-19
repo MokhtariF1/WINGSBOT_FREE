@@ -3611,196 +3611,196 @@ async def auto_approve_wallet_order(order_id: int, context: ContextTypes.DEFAULT
     and sends the connection info to the user.
     Returns True on success, False on failure.
     """
-    try:
-        order = query_db("SELECT * FROM orders WHERE id = ?", (order_id,), one=True)
-        if not order:
-            return False
+    # try:
+    order = query_db("SELECT * FROM orders WHERE id = ?", (order_id,), one=True)
+    if not order:
+        return False
 
-        plan = query_db("SELECT * FROM plans WHERE id = ?", (order['plan_id'],), one=True)
-        if not plan:
-            return False
+    plan = query_db("SELECT * FROM plans WHERE id = ?", (order['plan_id'],), one=True)
+    if not plan:
+        return False
 
-        # First check for Netico panels
-        netico_panel = query_db(
-            "SELECT * FROM panels WHERE panel_type = 'netico' LIMIT 1",
-            one=True
+    # First check for Netico panels
+    netico_panel = query_db(
+        "SELECT * FROM panels WHERE panel_type = 'netico' LIMIT 1",
+        one=True
+    )
+    
+    if netico_panel:
+        # Use Netico panel
+        from ..panel import NeticoAPI
+        api = NeticoAPI(netico_panel)
+        
+        # Create user on Netico panel
+        username, password, connection_info = await api.create_user(
+            user_id=order['user_id'],
+            plan=plan
         )
         
-        if netico_panel:
-            # Use Netico panel
-            from ..panel import NeticoAPI
-            api = NeticoAPI(netico_panel)
-            
-            # Create user on Netico panel
-            username, password, connection_info = await api.create_user(
-                user_id=order['user_id'],
-                plan=plan
-            )
-            
-            if not (username and password):
-                logger.error(f"Auto-approve failed for Netico order {order_id}: Failed to create user")
-                return False
-            
-            # Update order in DB
-            execute_db(
-                "UPDATE orders SET status = ?, marzban_username = ?, connection_info = ?, panel_id = ?, panel_type = ? WHERE id = ?",
-                (
-                    'approved',
-                    username,
-                    connection_info,
-                    netico_panel['id'],
-                    'netico',
-                    order_id
-                )
-            )
-            
-            # Footer and message composition
-            footer_row = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
-            footer_text = (footer_row.get('value') if footer_row else '') or ''
-            
-            message_text = (
-                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
-                f"<b>اطلاعات اتصال:</b>\n"
-                f"<b>نام کاربری:</b> <code>{username}</code>\n"
-                f"<b>رمز عبور:</b> <code>{password}</code>\n\n"
-                f"{connection_info}\n\n" + footer_text
-            )
-            
-            await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
-            return True
-            
-        # If no Netico panel, try XUI panels
-        xui_panel_types = ("'xui'", "'x-ui'", "'sanaei'", "'alireza'", "'3xui'", "'3x-ui'", "'txui'", "'tx-ui'")
-        type_list_sql = f"({', '.join(xui_panel_types)})"
-        row = query_db(
-            f"""
-            SELECT p.*, pi.id AS pi_id, pi.inbound_id AS default_inbound_id, pi.protocol AS default_protocol, pi.tag AS default_tag
-            FROM panels p
-            JOIN panel_inbounds pi ON pi.panel_id = p.id
-            WHERE p.panel_type IN {type_list_sql}
-            ORDER BY pi.inbound_id IS NULL, pi.id
-            """,
-            one=True,
-        )
-        if not row:
-            return False
-
-        panel_row = {k: row[k] for k in row.keys() if k in ('id','panel_type','url','username','password','token','sub_base','name')}
-        default_inbound_id = row.get('default_inbound_id')
-        default_protocol = row.get('default_protocol')
-        default_tag = row.get('default_tag')
-        pi_id = row.get('pi_id')
-
-        # Instantiate Panel API
-        ptype = panel_row['panel_type'].lower()
-        PanelAPIType = None
-        if ptype in ('xui', 'x-ui', 'alireza', 'sanaei'):
-            from ..panel import XuiAPI as PanelAPIType
-        elif ptype in ('3xui', '3x-ui'):
-            from ..panel import ThreeXuiAPI as PanelAPIType
-        elif ptype in ('txui', 'tx-ui', 'tx ui'):
-            from ..panel import TxUiAPI as PanelAPIType
-        
-        if not PanelAPIType:
-            return False
-        
-        api = PanelAPIType(panel_row)
-
-        # Resolve inbound id if missing by matching tag/protocol from panel
-        inbound_id = default_inbound_id
-        if not inbound_id:
-            try:
-                inbounds, _ = api.list_inbounds()
-            except Exception:
-                inbounds = []
-            if inbounds:
-                cand = None
-                for ib in inbounds:
-                    tag = ib.get('remark') or ib.get('tag')
-                    proto = (ib.get('protocol') or '').lower()
-                    if tag == default_tag or (default_protocol and proto == (default_protocol or '').lower() and tag):
-                        cand = ib
-                        break
-                inbound_id = cand.get('id') if cand else None
-                if inbound_id:
-                    try:
-                        execute_db("UPDATE panel_inbounds SET inbound_id = ? WHERE id = ?", (int(inbound_id), int(pi_id)))
-                    except Exception:
-                        pass
-        if not inbound_id:
-            return False
-
-        # Create user on inbound using panel helper
-        username_created, sub_link, message = api.create_user_on_inbound(int(inbound_id), order['user_id'], plan)
-        if not (username_created and sub_link):
-            logger.error(f"Auto-approve failed for order {order_id}: {message}")
+        if not (username and password):
+            logger.error(f"Auto-approve failed for Netico order {order_id}: Failed to create user")
             return False
         
         # Update order in DB
         execute_db(
-            "UPDATE orders SET status = ?, marzban_username = ?, xui_inbound_id = ?, xui_client_id = ?, last_link = ?, panel_id = ?, panel_type = ? WHERE id = ?",
+            "UPDATE orders SET status = ?, marzban_username = ?, connection_info = ?, panel_id = ?, panel_type = ? WHERE id = ?",
             (
                 'approved',
-                username_created,
-                int(inbound_id),
-                '',
-                sub_link,
-                panel_row['id'],
-                panel_row['panel_type'],
+                username,
+                connection_info,
+                netico_panel['id'],
+                'netico',
                 order_id
             )
         )
-
-        # Build config(s) similar to admin approval flow
-        panel_full = query_db("SELECT * FROM panels WHERE id = ?", (panel_row['id'],), one=True) or panel_row
-        inbound_detail = getattr(api, '_fetch_inbound_detail', lambda _id: None)(int(inbound_id))
-        built_confs = []
-        if inbound_detail:
-            try:
-                built_confs = _build_configs_from_inbound(inbound_detail, username_created, panel_full) or []
-            except Exception:
-                built_confs = []
-        # If none, try decoding subscription content
-        if not built_confs:
-            built_confs = _fetch_subscription_configs(sub_link)
-        # As extra attempt: use API helper if available
-        api_confs = []
-        if not built_confs and hasattr(api, 'get_configs_for_user_on_inbound'):
-            try:
-                api_confs = api.get_configs_for_user_on_inbound(int(inbound_id), username_created) or []
-            except Exception:
-                api_confs = []
-        display_confs = built_confs or api_confs
-
+        
         # Footer and message composition
         footer_row = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
         footer_text = (footer_row.get('value') if footer_row else '') or ''
-        sub_abs = sub_link
-        try:
-            if sub_abs and not sub_abs.startswith('http'):
-                sub_abs = f"{api.base_url}{sub_abs}"
-        except Exception:
-            pass
-        if display_confs:
-            preview = display_confs[:1]
-            configs_text = "\n".join(preview)
-            sub_line = f"\n<b>لینک ساب:</b>\n<code>{sub_abs}</code>\n" if sub_abs else ""
-            message_text = (
-                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
-                f"<b>کانفیگ شما:</b>\n<code>{configs_text}</code>{sub_line}\n" + footer_text
-            )
-        else:
-            message_text = (
-                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
-                f"<b>لینک اشتراک شما:</b>\n<code>{sub_abs}</code>\n\n" + footer_text
-            )
-        await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
         
+        message_text = (
+            f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+            f"<b>اطلاعات اتصال:</b>\n"
+            f"<b>نام کاربری:</b> <code>{username}</code>\n"
+            f"<b>رمز عبور:</b> <code>{password}</code>\n\n"
+            f"{connection_info}\n\n" + footer_text
+        )
+        
+        await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
         return True
-
-    except Exception as e:
-        logger.error(f"Error in auto_approve_wallet_order for order {order_id}: {e}")
+        
+    # If no Netico panel, try XUI panels
+    xui_panel_types = ("'xui'", "'x-ui'", "'sanaei'", "'alireza'", "'3xui'", "'3x-ui'", "'txui'", "'tx-ui'")
+    type_list_sql = f"({', '.join(xui_panel_types)})"
+    row = query_db(
+        f"""
+        SELECT p.*, pi.id AS pi_id, pi.inbound_id AS default_inbound_id, pi.protocol AS default_protocol, pi.tag AS default_tag
+        FROM panels p
+        JOIN panel_inbounds pi ON pi.panel_id = p.id
+        WHERE p.panel_type IN {type_list_sql}
+        ORDER BY pi.inbound_id IS NULL, pi.id
+        """,
+        one=True,
+    )
+    if not row:
         return False
+
+    panel_row = {k: row[k] for k in row.keys() if k in ('id','panel_type','url','username','password','token','sub_base','name')}
+    default_inbound_id = row.get('default_inbound_id')
+    default_protocol = row.get('default_protocol')
+    default_tag = row.get('default_tag')
+    pi_id = row.get('pi_id')
+
+    # Instantiate Panel API
+    ptype = panel_row['panel_type'].lower()
+    PanelAPIType = None
+    if ptype in ('xui', 'x-ui', 'alireza', 'sanaei'):
+        from ..panel import XuiAPI as PanelAPIType
+    elif ptype in ('3xui', '3x-ui'):
+        from ..panel import ThreeXuiAPI as PanelAPIType
+    elif ptype in ('txui', 'tx-ui', 'tx ui'):
+        from ..panel import TxUiAPI as PanelAPIType
+    
+    if not PanelAPIType:
+        return False
+    
+    api = PanelAPIType(panel_row)
+
+    # Resolve inbound id if missing by matching tag/protocol from panel
+    inbound_id = default_inbound_id
+    if not inbound_id:
+        try:
+            inbounds, _ = api.list_inbounds()
+        except Exception:
+            inbounds = []
+        if inbounds:
+            cand = None
+            for ib in inbounds:
+                tag = ib.get('remark') or ib.get('tag')
+                proto = (ib.get('protocol') or '').lower()
+                if tag == default_tag or (default_protocol and proto == (default_protocol or '').lower() and tag):
+                    cand = ib
+                    break
+            inbound_id = cand.get('id') if cand else None
+            if inbound_id:
+                try:
+                    execute_db("UPDATE panel_inbounds SET inbound_id = ? WHERE id = ?", (int(inbound_id), int(pi_id)))
+                except Exception:
+                    pass
+    if not inbound_id:
+        return False
+
+    # Create user on inbound using panel helper
+    username_created, sub_link, message = api.create_user_on_inbound(int(inbound_id), order['user_id'], plan)
+    if not (username_created and sub_link):
+        logger.error(f"Auto-approve failed for order {order_id}: {message}")
+        return False
+    
+    # Update order in DB
+    execute_db(
+        "UPDATE orders SET status = ?, marzban_username = ?, xui_inbound_id = ?, xui_client_id = ?, last_link = ?, panel_id = ?, panel_type = ? WHERE id = ?",
+        (
+            'approved',
+            username_created,
+            int(inbound_id),
+            '',
+            sub_link,
+            panel_row['id'],
+            panel_row['panel_type'],
+            order_id
+        )
+    )
+
+    # Build config(s) similar to admin approval flow
+    panel_full = query_db("SELECT * FROM panels WHERE id = ?", (panel_row['id'],), one=True) or panel_row
+    inbound_detail = getattr(api, '_fetch_inbound_detail', lambda _id: None)(int(inbound_id))
+    built_confs = []
+    if inbound_detail:
+        try:
+            built_confs = _build_configs_from_inbound(inbound_detail, username_created, panel_full) or []
+        except Exception:
+            built_confs = []
+    # If none, try decoding subscription content
+    if not built_confs:
+        built_confs = _fetch_subscription_configs(sub_link)
+    # As extra attempt: use API helper if available
+    api_confs = []
+    if not built_confs and hasattr(api, 'get_configs_for_user_on_inbound'):
+        try:
+            api_confs = api.get_configs_for_user_on_inbound(int(inbound_id), username_created) or []
+        except Exception:
+            api_confs = []
+    display_confs = built_confs or api_confs
+
+    # Footer and message composition
+    footer_row = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
+    footer_text = (footer_row.get('value') if footer_row else '') or ''
+    sub_abs = sub_link
+    try:
+        if sub_abs and not sub_abs.startswith('http'):
+            sub_abs = f"{api.base_url}{sub_abs}"
+    except Exception:
+        pass
+    if display_confs:
+        preview = display_confs[:1]
+        configs_text = "\n".join(preview)
+        sub_line = f"\n<b>لینک ساب:</b>\n<code>{sub_abs}</code>\n" if sub_abs else ""
+        message_text = (
+            f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+            f"<b>کانفیگ شما:</b>\n<code>{configs_text}</code>{sub_line}\n" + footer_text
+        )
+    else:
+        message_text = (
+            f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+            f"<b>لینک اشتراک شما:</b>\n<code>{sub_abs}</code>\n\n" + footer_text
+        )
+    await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
+    
+    return True
+
+    # except Exception as e:
+    #     logger.error(f"Error in auto_approve_wallet_order for order {order_id}: {e}")
+    #     return False
 
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
