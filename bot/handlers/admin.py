@@ -1804,10 +1804,11 @@ async def admin_panel_receive_name(update: Update, context: ContextTypes.DEFAULT
     context.user_data['new_panel']['name'] = update.message.text
     keyboard = [
         [InlineKeyboardButton("Marzban", callback_data="panel_type_marzban")],
-        [InlineKeyboardButton("Alireza (X-UI)", callback_data="panel_type_xui")],
-        [InlineKeyboardButton("3x-UI", callback_data="panel_type_3xui")],
-        [InlineKeyboardButton("TX-UI", callback_data="panel_type_txui")],
-        [InlineKeyboardButton("Marzneshin", callback_data="panel_type_marzneshin")],
+[InlineKeyboardButton("Alireza (X-UI)", callback_data="panel_type_xui")],
+[InlineKeyboardButton("3x-UI", callback_data="panel_type_3xui")],
+[InlineKeyboardButton("TX-UI", callback_data="panel_type_txui")],
+[InlineKeyboardButton("Marzneshin", callback_data="panel_type_marzneshin")],
+[InlineKeyboardButton("Netico", callback_data="panel_type_netico")],
     ]
     await update.message.reply_text("نوع پنل را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADMIN_PANEL_AWAIT_TYPE

@@ -67,3 +67,6 @@ NOBITEX_TOKEN = os.getenv("NOBITEX_TOKEN", "")
 
 # Job schedule hour for daily tasks
 DAILY_JOB_HOUR = _safe_int(os.getenv("DAILY_JOB_HOUR", "9"), 9)
+
+# Netico Panel Settings
+NETICO_AGENT_ID = os.getenv("NETICO_AGENT_ID", "000425533625")

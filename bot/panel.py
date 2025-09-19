@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import json
 import re
 from urllib.parse import urlsplit
-from .config import logger
+from .config import logger, NETICO_AGENT_ID
 from .db import query_db
 import time as _time
 
@@ -3849,6 +3849,263 @@ class MarzneshinAPI(BasePanelAPI):
             return None
 
 
+class NeticoAPI(BasePanelAPI):
+    """Netico Panel API implementation for reseller.neticoapp.space"""
+    
+    def __init__(self, panel_row):
+        self.panel_id = panel_row['id']
+        _raw = (panel_row['url'] or '').strip().rstrip('/')
+        if _raw and '://' not in _raw:
+            _raw = f"https://{_raw}"
+        self.base_url = _raw
+        self.username = panel_row['username']
+        self.password = panel_row['password']
+        self.session = requests.Session()
+        self.cookies = None
+        self.agent_id = panel_row.get('agent_id') or NETICO_AGENT_ID  # Default agent ID
+        
+    def get_token(self):
+        """Login to Netico panel and get cookies for authentication"""
+        if not all([self.base_url, self.username, self.password]):
+            logger.error("Netico panel credentials are not set for this panel.")
+            return False
+            
+        try:
+            login_url = f"{self.base_url}/login_db.php"
+            login_data = {
+                'username': self.username,
+                'password': self.password
+            }
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+            }
+            
+            r = self.session.post(
+                login_url,
+                data=login_data,
+                headers=headers,
+                timeout=10
+            )
+            
+            r.raise_for_status()
+            
+            # Check if login was successful by verifying cookies
+            if 'PHPSESSID' in self.session.cookies:
+                self.cookies = self.session.cookies
+                return True
+            else:
+                logger.error(f"Failed to login to Netico panel: No session cookie received")
+                return False
+                
+        except requests.RequestException as e:
+            logger.error(f"Failed to login to Netico panel: {e}")
+            return False
+    
+    async def create_user(self, user_id, plan):
+        """Create a new user in Netico panel"""
+        if not self.cookies and not self.get_token():
+            return None, None, "خطا در اتصال به پنل. لطفا تنظیمات را بررسی کنید."
+        
+        # Generate random username and password
+        new_username = f"user_{user_id}_{uuid.uuid4().hex[:6]}"
+        new_password = ''.join([str(random.randint(0, 9)) for _ in range(4)])  # 4-digit password
+        
+        # Get traffic and duration from plan
+        traffic_gb = float(plan['traffic_gb'])
+        duration_days = int(plan['duration_days'])
+        
+        # For Netico, we need to convert duration_days to their date format
+        # Assuming direct mapping (e.g., 30 days = 30)
+        date_value = duration_days
+        
+        # Default to 1 concurrent user
+        multi_user = 1
+        
+        try:
+            create_url = f"{self.base_url}/add_userPro.php?add"
+            
+            # Prepare form data
+            form_data = {
+                'user_id': '',  # Empty as per example
+                'username': new_username,
+                'password': new_password,
+                'total': str(int(traffic_gb)),  # Convert to integer
+                'date': str(date_value),
+                'op_multi': str(multi_user),
+                'op_agents': self.agent_id,
+                'submit': ''  # Empty as per example
+            }
+            
+            # Prepare headers
+            headers = {
+                'Content-Type': 'multipart/form-data',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+            }
+            
+            # Send request
+            r = self.session.post(
+                create_url,
+                data=form_data,
+                headers=headers,
+                timeout=15
+            )
+            
+            r.raise_for_status()
+            
+            # Store user information in our database for future reference
+            # Since we don't have API to check user status, we need to store this info
+            current_time = int(datetime.now().timestamp())
+            expire_time = int((datetime.now() + timedelta(days=duration_days)).timestamp())
+            
+            user_data = {
+                'panel_id': self.panel_id,
+                'user_id': user_id,
+                'panel_username': new_username,
+                'panel_password': new_password,
+                'traffic_limit': int(traffic_gb * 1024 * 1024 * 1024),  # Convert GB to bytes
+                'created_at': current_time,
+                'expire_at': expire_time,
+                'multi_user': multi_user
+            }
+            
+            # Insert into user_services table (assuming this table exists)
+            execute_db(
+                "INSERT INTO user_services (panel_id, user_id, panel_username, panel_password, traffic_limit, created_at, expire_at, multi_user) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.panel_id, user_id, new_username, new_password, user_data['traffic_limit'], current_time, expire_time, multi_user)
+            )
+            
+            # Return username, connection info, and status
+            connection_info = f"نام کاربری: {new_username}\nرمز عبور: {new_password}\nحجم: {traffic_gb} گیگابایت\nمدت: {duration_days} روز\nتعداد کاربر همزمان: {multi_user}"
+            
+            logger.info(f"Successfully created Netico user: {new_username}")
+            return new_username, connection_info, "Success"
+            
+        except requests.RequestException as e:
+            logger.error(f"Failed to create new user in Netico panel: {e}")
+            return None, None, f"خطای پنل: {e}"
+    
+    async def get_user(self, username):
+        """Get user information from database since Netico doesn't provide API for this"""
+        # Retrieve user data from our database
+        user_data = query_db(
+            "SELECT * FROM user_services WHERE panel_username = ? AND panel_id = ?", 
+            (username, self.panel_id), 
+            one=True
+        )
+        
+        if not user_data:
+            return None, "کاربر یافت نشد"
+        
+        # Calculate remaining time
+        current_time = int(datetime.now().timestamp())
+        expire_time = user_data.get('expire_at', 0)
+        remaining_seconds = max(0, expire_time - current_time)
+        remaining_days = remaining_seconds // 86400  # Convert seconds to days
+        
+        # Convert traffic limit from bytes to GB
+        traffic_limit_gb = user_data.get('traffic_limit', 0) / (1024 * 1024 * 1024)
+        
+        # Since we don't have API to check used traffic, we can't provide this info
+        # We'll return 0 for used_traffic
+        
+        # Prepare user info in a format similar to other panel APIs
+        user_info = {
+            'username': user_data.get('panel_username', ''),
+            'password': user_data.get('panel_password', ''),
+            'data_limit': user_data.get('traffic_limit', 0),
+            'data_limit_gb': traffic_limit_gb,
+            'expire': expire_time,
+            'remaining_days': remaining_days,
+            'used_traffic': 0,  # We don't have this info
+            'status': 'active' if expire_time > current_time else 'expired',
+            'multi_user': user_data.get('multi_user', 1)
+        }
+        
+        return user_info, "Success"
+    
+    async def get_all_users(self):
+        """Get all users from database since Netico doesn't provide API for this"""
+        # Retrieve all users for this panel from our database
+        users_data = query_db(
+            "SELECT * FROM user_services WHERE panel_id = ?", 
+            (self.panel_id,)
+        )
+        
+        if not users_data:
+            return [], "No users found"
+        
+        # Process each user to add calculated fields
+        current_time = int(datetime.now().timestamp())
+        processed_users = []
+        
+        for user in users_data:
+            expire_time = user.get('expire_at', 0)
+            remaining_seconds = max(0, expire_time - current_time)
+            remaining_days = remaining_seconds // 86400
+            
+            traffic_limit_gb = user.get('traffic_limit', 0) / (1024 * 1024 * 1024)
+            
+            processed_user = {
+                'username': user.get('panel_username', ''),
+                'password': user.get('panel_password', ''),
+                'data_limit': user.get('traffic_limit', 0),
+                'data_limit_gb': traffic_limit_gb,
+                'expire': expire_time,
+                'remaining_days': remaining_days,
+                'used_traffic': 0,  # We don't have this info
+                'status': 'active' if expire_time > current_time else 'expired',
+                'multi_user': user.get('multi_user', 1)
+            }
+            
+            processed_users.append(processed_user)
+        
+        return processed_users, "Success"
+    
+    async def renew_user_in_panel(self, username, plan):
+        """Renew user in Netico panel"""
+        # This is a placeholder. Implement the actual renewal API call when available
+        # For now, we'll just update our database
+        
+        user_data = query_db(
+            "SELECT * FROM user_services WHERE panel_username = ? AND panel_id = ?", 
+            (username, self.panel_id), 
+            one=True
+        )
+        
+        if not user_data:
+            return None, f"کاربر {username} برای تمدید یافت نشد."
+        
+        # Calculate new expiration time
+        current_expire = user_data.get('expire_at', 0)
+        current_time = int(datetime.now().timestamp())
+        base_timestamp = max(current_expire, current_time)
+        additional_days_in_seconds = int(plan['duration_days']) * 86400
+        new_expire_timestamp = base_timestamp + additional_days_in_seconds
+        
+        # Calculate new traffic limit
+        current_traffic_limit = user_data.get('traffic_limit', 0)
+        additional_traffic_bytes = int(float(plan['traffic_gb']) * 1024 * 1024 * 1024)
+        new_traffic_limit = current_traffic_limit + additional_traffic_bytes
+        
+        # Update database
+        execute_db(
+            "UPDATE user_services SET traffic_limit = ?, expire_at = ? WHERE panel_username = ? AND panel_id = ?",
+            (new_traffic_limit, new_expire_timestamp, username, self.panel_id)
+        )
+        
+        # Return updated user info
+        updated_user = {
+            'username': username,
+            'data_limit': new_traffic_limit,
+            'expire': new_expire_timestamp,
+            'status': 'active'
+        }
+        
+        return updated_user, "Success"
+
+
 def VpnPanelAPI(panel_id: int) -> BasePanelAPI:
     panel_row = query_db("SELECT * FROM panels WHERE id = ?", (panel_id,), one=True)
     if not panel_row:
@@ -3864,5 +4121,7 @@ def VpnPanelAPI(panel_id: int) -> BasePanelAPI:
         return ThreeXuiAPI(panel_row)
     if ptype in ('txui', 'tx-ui', 'tx ui', 'tx'):
         return TxUiAPI(panel_row)
+    if ptype == 'netico':
+        return NeticoAPI(panel_row)
     logger.error(f"Unknown panel type '{ptype}' for panel {panel_row['name']}")
     return MarzbanAPI(panel_row)

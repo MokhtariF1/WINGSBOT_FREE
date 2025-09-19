@@ -137,30 +137,44 @@ async def process_renewal_for_order(order_id: int, plan_id: int, context: Contex
         return False, "نام کاربری سرویس ثبت نشده است"
     # For 3x-UI, renew on the same inbound id used at creation
     panel_type = (query_db("SELECT panel_type FROM panels WHERE id = ?", (order['panel_id'],), one=True) or {}).get('panel_type', '').lower()
-    if panel_type in ('3xui','3x-ui','3x ui'):
-        inbound_id = int(order.get('xui_inbound_id') or 0)
-        if inbound_id:
-            add_gb = 0.0
-            add_days = 0
-            try:
-                add_gb = float(plan.get('traffic_gb', 0))
-            except Exception:
+    if panel_type == 'netico':
+        # برای پنل Netico، تمدید را انجام می‌دهیم
+        try:
+            panel_api = VpnPanelAPI(order['panel_id'])
+            result, message = await panel_api.renew_user_in_panel(order['marzban_username'], plan)
+            if result:
+                _logger.info(f"Successfully renewed Netico user {order['marzban_username']} for order {order_id}")
+                return True
+            else:
+                _logger.error(f"Failed to renew Netico user {order['marzban_username']} for order {order_id}: {message}")
+                return False
+        except Exception as e:
+            _logger.error(f"Error renewing Netico user for order {order_id}: {e}")
+            return False
+    elif panel_type in ('3xui','3x-ui','3x ui'):
+            inbound_id = int(order.get('xui_inbound_id') or 0)
+            if inbound_id:
                 add_gb = 0.0
-            try:
-                add_days = int(plan.get('duration_days', 0))
-            except Exception:
                 add_days = 0
-            # Prefer recreate strategy first for 3x-UI for maximum compatibility
-            if hasattr(api, 'renew_by_recreate_on_inbound'):
-                renewed_user, message = api.renew_by_recreate_on_inbound(inbound_id, marz_username, add_gb, add_days)
-                if not renewed_user and hasattr(api, 'renew_user_on_inbound'):
+                try:
+                    add_gb = float(plan.get('traffic_gb', 0))
+                except Exception:
+                    add_gb = 0.0
+                try:
+                    add_days = int(plan.get('duration_days', 0))
+                except Exception:
+                    add_days = 0
+                # Prefer recreate strategy first for 3x-UI for maximum compatibility
+                if hasattr(api, 'renew_by_recreate_on_inbound'):
+                    renewed_user, message = api.renew_by_recreate_on_inbound(inbound_id, marz_username, add_gb, add_days)
+                    if not renewed_user and hasattr(api, 'renew_user_on_inbound'):
+                        renewed_user, message = api.renew_user_on_inbound(inbound_id, marz_username, add_gb, add_days)
+                elif hasattr(api, 'renew_user_on_inbound'):
                     renewed_user, message = api.renew_user_on_inbound(inbound_id, marz_username, add_gb, add_days)
-            elif hasattr(api, 'renew_user_on_inbound'):
-                renewed_user, message = api.renew_user_on_inbound(inbound_id, marz_username, add_gb, add_days)
+                else:
+                    renewed_user, message = await api.renew_user_in_panel(marz_username, plan)
             else:
                 renewed_user, message = await api.renew_user_in_panel(marz_username, plan)
-        else:
-            renewed_user, message = await api.renew_user_in_panel(marz_username, plan)
     elif panel_type in ('xui','x-ui','sanaei','alireza'):
         inbound_id = int(order.get('xui_inbound_id') or 0)
         if inbound_id:
@@ -199,3 +213,4 @@ async def process_renewal_for_order(order_id: int, plan_id: int, context: Contex
     except Exception:
         pass
     return False, message
+    
