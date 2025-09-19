@@ -4035,6 +4035,30 @@ class NeticoAPI(BasePanelAPI):
             logger.error(f"Error renewing user in Netico panel: {str(e)}")
             return None, f"خطا در تمدید کاربر: {str(e)}"
         
+    def list_inbounds(self):
+        """
+        دریافت لیست اینباندهای پنل Netico
+        برای سازگاری با سایر پنل‌ها، یک اینباند پیش‌فرض برمی‌گرداند
+        """
+        if not self.get_token():
+            return None, "خطا در اتصال به پنل Netico"
+            
+        try:
+            # در پنل Netico مفهوم اینباند وجود ندارد، اما برای سازگاری با سایر پنل‌ها
+            # یک اینباند پیش‌فرض برمی‌گردانیم
+            default_inbound = {
+                'id': 1,
+                'remark': 'Netico Default',
+                'protocol': 'netico',
+                'port': 443
+            }
+            
+            return [default_inbound], "اینباند پیش‌فرض Netico"
+                
+        except Exception as e:
+            logger.error(f"Error listing inbounds from Netico panel: {str(e)}")
+            return None, f"خطا در دریافت لیست اینباندها: {str(e)}"
+    
     def get_token(self):
         """Login to Netico panel and get cookies for authentication"""
         if not all([self.base_url, self.username, self.password]):

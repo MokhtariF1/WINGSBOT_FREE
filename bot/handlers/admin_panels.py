@@ -164,6 +164,8 @@ async def admin_panel_receive_pass(update: Update, context: ContextTypes.DEFAULT
         from ..panel import ThreeXuiAPI as PanelAPIType
     elif ptype in ('txui', 'tx-ui', 'tx ui'):
         from ..panel import TxUiAPI as PanelAPIType
+    elif ptype == 'netico':
+        from ..panel import NeticoAPI as PanelAPIType
     else:
         # Fallback or error for unsupported types
         await update.message.reply_text(f"نوع پنل {ptype} برای اتصال مستقیم پشتیبانی نمی‌شود.")
