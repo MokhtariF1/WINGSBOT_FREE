@@ -3864,23 +3864,48 @@ class NeticoAPI(BasePanelAPI):
         self.cookies = None
         self.agent_id = panel_row.get('agent_id') or NETICO_AGENT_ID  # Default agent ID
         
-    def create_user(self, username, plan, **kwargs):
+    def create_user(self, username=None, plan=None, traffic_limit=None, days=None, user_id=None, **kwargs):
         """
         ایجاد کاربر جدید در پنل Netico
+        پشتیبانی از دو حالت فراخوانی:
+        1. با username و plan (برای فراخوانی از بخش‌های مختلف)
+        2. با traffic_limit و days و user_id (برای فراخوانی از auto_approve_wallet_order)
         """
         if not self.get_token():
-            return None, "خطا در اتصال به پنل Netico"
+            return None, None, "خطا در اتصال به پنل Netico"
             
         try:
             # تنظیم پارامترهای ایجاد کاربر
             create_url = f"{self.base_url}/api/user/create.php"
             
             # محاسبه مقادیر برای ایجاد کاربر
-            traffic_gb = float(plan.get('traffic_gb', 0))
-            duration_days = int(plan.get('duration_days', 0))
+            traffic_gb = 0
+            duration_days = 0
+            
+            # تعیین نام کاربری
+            if not username and user_id:
+                # ایجاد نام کاربری بر اساس شناسه کاربر
+                username = f"user{user_id}_{int(datetime.now().timestamp())}"
+            
+            # تعیین ترافیک و مدت زمان
+            if plan:
+                traffic_gb = float(plan.get('traffic_gb', 0))
+                duration_days = int(plan.get('duration_days', 0))
+            
+            # اولویت با پارامترهای مستقیم
+            if traffic_limit is not None:
+                traffic_gb = float(traffic_limit)
+            if days is not None:
+                duration_days = int(days)
+                
+            # ایجاد رمز عبور تصادفی
+            import random
+            import string
+            password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
             
             create_data = {
                 'username': username,
+                'password': password,
                 'traffic': traffic_gb,
                 'days': duration_days,
                 'agent_id': self.agent_id
@@ -3914,6 +3939,7 @@ class NeticoAPI(BasePanelAPI):
                 # بازگرداندن اطلاعات کاربر به فرمت استاندارد
                 standardized_user = {
                     'username': username,
+                    'password': password,
                     'data_limit': traffic_gb * 1024 * 1024 * 1024,  # تبدیل به بایت
                     'used_traffic': 0,
                     'expire': user_data.get('expire_time'),
@@ -3921,14 +3947,15 @@ class NeticoAPI(BasePanelAPI):
                     'status': 'active',
                     'connection_info': connection_info
                 }
-                return standardized_user, connection_info
+                # برگرداندن سه مقدار برای سازگاری با auto_approve_wallet_order
+                return username, password, connection_info
             else:
                 error_message = response.get('message', 'خطای نامشخص در ایجاد کاربر')
-                return None, error_message
+                return None, None, error_message
                 
         except Exception as e:
             logger.error(f"Error creating user in Netico panel: {str(e)}")
-            return None, f"خطا در ایجاد کاربر: {str(e)}"
+            return None, None, f"خطا در ایجاد کاربر: {str(e)}"
     
     def get_user(self, username):
         """
