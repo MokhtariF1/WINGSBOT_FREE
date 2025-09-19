@@ -4153,7 +4153,7 @@ class NeticoAPI(BasePanelAPI):
         """Create a new user in Netico panel"""
         if not self.cookies and not self.get_token():
             return None, None, "خطا در اتصال به پنل. لطفا تنظیمات را بررسی کنید."
-        
+        import uuid
         # Generate random username and password
         new_username = f"user_{user_id}_{uuid.uuid4().hex[:6]}"
         import random
