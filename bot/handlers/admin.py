@@ -3633,9 +3633,8 @@ async def auto_approve_wallet_order(order_id: int, context: ContextTypes.DEFAULT
             
             # Create user on Netico panel
             username, password, connection_info = api.create_user(
-                traffic_limit=plan.get('traffic_gb', 0),
-                days=plan.get('duration_days', 30),
-                user_id=order['user_id']
+                user_id=order['user_id'],
+                plan=plan
             )
             
             if not (username and password):
