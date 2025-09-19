@@ -369,7 +369,9 @@ async def admin_ask_panel_for_approval(update: Update, context: ContextTypes.DEF
 
     keyboard = []
     for p in panels:
-        label = f"ساخت در: {p['name']} ({p['panel_type']})"
+        # اضافه کردن نوع پنل به برچسب دکمه برای تشخیص بهتر
+        panel_type_display = p['panel_type']
+        label = f"ساخت در: {p['name']} ({panel_type_display})"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"approve_on_panel_{order_id}_{p['id']}")])
     await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -396,7 +398,65 @@ async def admin_approve_on_panel(update: Update, context: ContextTypes.DEFAULT_T
     ptype = (panel_row.get('panel_type') or 'marzban').lower()
     api = VpnPanelAPI(panel_id=panel_id)
 
-    if ptype in ('xui', 'x-ui', 'sanaei', 'alireza', '3xui', '3x-ui', 'txui', 'tx-ui', 'sui', 's-ui'):
+    # اضافه کردن پشتیبانی از پنل Netico
+    if ptype == 'netico':
+        # استفاده از NeticoAPI برای ساخت کاربر
+        from ..panel import NeticoAPI
+        netico_api = NeticoAPI(panel_row)
+        
+        # ساخت کاربر در پنل Netico
+        username, password, connection_info = netico_api.create_user(
+            traffic_limit=plan.get('traffic_gb', 0),
+            days=plan.get('duration_days', 30),
+            user_id=order['user_id']
+        )
+        
+        if username and password and connection_info:
+            # به‌روزرسانی وضعیت سفارش در دیتابیس
+            execute_db(
+                "UPDATE orders SET status = 'approved', marzban_username = ?, panel_id = ?, panel_type = ?, connection_info = ? WHERE id = ?", 
+                (username, panel_id, 'netico', connection_info, order_id)
+            )
+            
+            if order.get('discount_code'):
+                execute_db("UPDATE discount_codes SET times_used = times_used + 1 WHERE code = ?", (order['discount_code'],))
+            
+            # اعمال پاداش معرف
+            await _apply_referral_bonus(order_id, context)
+            
+            # دریافت متن پاورقی کانفیگ
+            cfg = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
+            footer = (cfg.get('value') if cfg else '') or ''
+            
+            # ساخت پیام نهایی برای کاربر
+            final_message = (
+                f"✅ سفارش شما تایید شد!\n\n"
+                f"<b>پلن:</b> {plan['name']}\n"
+                f"<b>اطلاعات اتصال:</b>\n<code>{connection_info}</code>\n\n" + footer
+            )
+            
+            try:
+                await context.bot.send_message(order['user_id'], final_message, parse_mode=ParseMode.HTML)
+                done_text = base_text + f"\n\n\u2705 **ارسال خودکار موفق بود.**"
+                if is_media:
+                    await _safe_edit_caption(query.message, done_text, parse_mode=ParseMode.HTML, reply_markup=None)
+                else:
+                    await _safe_edit_text(query.message, done_text, parse_mode=ParseMode.HTML, reply_markup=None)
+            except TelegramError as e:
+                err_text = base_text + f"\n\n\u26A0\uFE0F **خطا:** ارسال به کاربر ناموفق بود. {e}\nاطلاعات اتصال: <code>{connection_info}</code>"
+                if is_media:
+                    await _safe_edit_caption(query.message, err_text, parse_mode=ParseMode.HTML, reply_markup=None)
+                else:
+                    await _safe_edit_text(query.message, err_text, parse_mode=ParseMode.HTML, reply_markup=None)
+        else:
+            fail_text = base_text + f"\n\n\u274C **خطای پنل Netico:** ساخت کاربر ناموفق بود."
+            if is_media:
+                await _safe_edit_caption(query.message, fail_text, parse_mode=ParseMode.HTML, reply_markup=None)
+            else:
+                await _safe_edit_text(query.message, fail_text, parse_mode=ParseMode.HTML, reply_markup=None)
+        return
+    
+    elif ptype in ('xui', 'x-ui', 'sanaei', 'alireza', '3xui', '3x-ui', 'txui', 'tx-ui', 'sui', 's-ui'):
         # Step 1: show inbound list to admin
         inbounds, msg = api.list_inbounds() if hasattr(api, 'list_inbounds') else (None, 'Not supported')
         if not inbounds:
@@ -3547,8 +3607,8 @@ async def admin_set_trial_panel_choose(update: Update, context: ContextTypes.DEF
 async def auto_approve_wallet_order(order_id: int, context: ContextTypes.DEFAULT_TYPE, user: User) -> bool:
     """
     Attempts to automatically approve an order paid by wallet.
-    Finds a suitable x-ui/3x-ui panel, creates the user on its default inbound,
-    and sends the config to the user.
+    Finds a suitable panel (Netico or x-ui/3x-ui), creates the user,
+    and sends the connection info to the user.
     Returns True on success, False on failure.
     """
     try:
@@ -3560,7 +3620,57 @@ async def auto_approve_wallet_order(order_id: int, context: ContextTypes.DEFAULT
         if not plan:
             return False
 
-        # Find a suitable panel that has a default inbound configured
+        # First check for Netico panels
+        netico_panel = query_db(
+            "SELECT * FROM panels WHERE panel_type = 'netico' LIMIT 1",
+            one=True
+        )
+        
+        if netico_panel:
+            # Use Netico panel
+            from ..panel import NeticoAPI
+            api = NeticoAPI(netico_panel)
+            
+            # Create user on Netico panel
+            username, password, connection_info = api.create_user(
+                traffic_limit=plan.get('traffic_gb', 0),
+                days=plan.get('duration_days', 30),
+                user_id=order['user_id']
+            )
+            
+            if not (username and password):
+                logger.error(f"Auto-approve failed for Netico order {order_id}: Failed to create user")
+                return False
+            
+            # Update order in DB
+            execute_db(
+                "UPDATE orders SET status = ?, marzban_username = ?, connection_info = ?, panel_id = ?, panel_type = ? WHERE id = ?",
+                (
+                    'approved',
+                    username,
+                    connection_info,
+                    netico_panel['id'],
+                    'netico',
+                    order_id
+                )
+            )
+            
+            # Footer and message composition
+            footer_row = query_db("SELECT value FROM settings WHERE key = 'config_footer_text'", one=True)
+            footer_text = (footer_row.get('value') if footer_row else '') or ''
+            
+            message_text = (
+                f"✅ سرویس شما با موفقیت ساخته شد!\n\n"
+                f"<b>اطلاعات اتصال:</b>\n"
+                f"<b>نام کاربری:</b> <code>{username}</code>\n"
+                f"<b>رمز عبور:</b> <code>{password}</code>\n\n"
+                f"{connection_info}\n\n" + footer_text
+            )
+            
+            await context.bot.send_message(user.id, message_text, parse_mode=ParseMode.HTML)
+            return True
+            
+        # If no Netico panel, try XUI panels
         xui_panel_types = ("'xui'", "'x-ui'", "'sanaei'", "'alireza'", "'3xui'", "'3x-ui'", "'txui'", "'tx-ui'")
         type_list_sql = f"({', '.join(xui_panel_types)})"
         row = query_db(

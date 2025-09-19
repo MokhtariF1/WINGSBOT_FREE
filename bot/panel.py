@@ -3864,6 +3864,177 @@ class NeticoAPI(BasePanelAPI):
         self.cookies = None
         self.agent_id = panel_row.get('agent_id') or NETICO_AGENT_ID  # Default agent ID
         
+    def create_user(self, username, plan, **kwargs):
+        """
+        ایجاد کاربر جدید در پنل Netico
+        """
+        if not self.get_token():
+            return None, "خطا در اتصال به پنل Netico"
+            
+        try:
+            # تنظیم پارامترهای ایجاد کاربر
+            create_url = f"{self.base_url}/api/user/create.php"
+            
+            # محاسبه مقادیر برای ایجاد کاربر
+            traffic_gb = float(plan.get('traffic_gb', 0))
+            duration_days = int(plan.get('duration_days', 0))
+            
+            create_data = {
+                'username': username,
+                'traffic': traffic_gb,
+                'days': duration_days,
+                'agent_id': self.agent_id
+            }
+            
+            # اضافه کردن پارامترهای اختیاری
+            if kwargs.get('password'):
+                create_data['password'] = kwargs.get('password')
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+            }
+            
+            r = self.session.post(
+                create_url,
+                data=create_data,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=10
+            )
+            
+            r.raise_for_status()
+            
+            response = r.json()
+            if response.get('status') == 'success':
+                # دریافت اطلاعات کاربر ایجاد شده
+                user_data = response.get('data', {})
+                connection_info = user_data.get('connection_info', '')
+                
+                # بازگرداندن اطلاعات کاربر به فرمت استاندارد
+                standardized_user = {
+                    'username': username,
+                    'data_limit': traffic_gb * 1024 * 1024 * 1024,  # تبدیل به بایت
+                    'used_traffic': 0,
+                    'expire': user_data.get('expire_time'),
+                    'subscription_url': user_data.get('subscription_url', ''),
+                    'status': 'active',
+                    'connection_info': connection_info
+                }
+                return standardized_user, connection_info
+            else:
+                error_message = response.get('message', 'خطای نامشخص در ایجاد کاربر')
+                return None, error_message
+                
+        except Exception as e:
+            logger.error(f"Error creating user in Netico panel: {str(e)}")
+            return None, f"خطا در ایجاد کاربر: {str(e)}"
+    
+    def get_user(self, username):
+        """
+        دریافت اطلاعات کاربر از پنل Netico
+        """
+        if not self.get_token():
+            return None, "خطا در اتصال به پنل Netico"
+            
+        try:
+            user_url = f"{self.base_url}/api/user/info.php"
+            user_data = {
+                'username': username,
+                'agent_id': self.agent_id
+            }
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+            }
+            
+            r = self.session.post(
+                user_url,
+                data=user_data,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=10
+            )
+            
+            r.raise_for_status()
+            
+            response = r.json()
+            if response.get('status') == 'success':
+                user_data = response.get('data', {})
+                # تبدیل داده‌های کاربر به فرمت استاندارد
+                standardized_user = {
+                    'username': user_data.get('username'),
+                    'data_limit': user_data.get('traffic_limit_gb', 0) * 1024 * 1024 * 1024,  # تبدیل به بایت
+                    'used_traffic': user_data.get('traffic_used_gb', 0) * 1024 * 1024 * 1024,  # تبدیل به بایت
+                    'expire': user_data.get('expire_time'),  # تاریخ انقضا به صورت timestamp
+                    'subscription_url': user_data.get('subscription_url', ''),
+                    'status': user_data.get('status', 'active'),
+                    'connection_info': user_data.get('connection_info', '')
+                }
+                return standardized_user, "اطلاعات کاربر با موفقیت دریافت شد"
+            else:
+                error_message = response.get('message', 'خطای نامشخص در دریافت اطلاعات کاربر')
+                return None, error_message
+                
+        except Exception as e:
+            logger.error(f"Error getting user info from Netico panel: {str(e)}")
+            return None, f"خطا در دریافت اطلاعات کاربر: {str(e)}"
+    
+    async def renew_user_in_panel(self, username, plan):
+        """
+        تمدید کاربر در پنل Netico
+        """
+        if not self.get_token():
+            return None, "خطا در اتصال به پنل Netico"
+            
+        try:
+            # دریافت اطلاعات کاربر فعلی
+            user_info, message = self.get_user(username)
+            if not user_info:
+                return None, f"خطا در دریافت اطلاعات کاربر: {message}"
+                
+            # محاسبه مقادیر جدید برای تمدید
+            add_days = int(plan.get('duration_days', 0))
+            add_gb = float(plan.get('traffic_gb', 0))
+            
+            # تنظیم پارامترهای تمدید
+            renew_url = f"{self.base_url}/api/user/renew.php"
+            renew_data = {
+                'username': username,
+                'days': add_days,
+                'traffic': add_gb,
+                'agent_id': self.agent_id
+            }
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+            }
+            
+            r = self.session.post(
+                renew_url,
+                data=renew_data,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=10
+            )
+            
+            r.raise_for_status()
+            
+            response = r.json()
+            if response.get('status') == 'success':
+                # بروزرسانی اطلاعات کاربر پس از تمدید
+                updated_user, _ = self.get_user(username)
+                return updated_user, "تمدید با موفقیت انجام شد"
+            else:
+                error_message = response.get('message', 'خطای نامشخص در تمدید کاربر')
+                return None, error_message
+                
+        except Exception as e:
+            logger.error(f"Error renewing user in Netico panel: {str(e)}")
+            return None, f"خطا در تمدید کاربر: {str(e)}"
+        
     def get_token(self):
         """Login to Netico panel and get cookies for authentication"""
         if not all([self.base_url, self.username, self.password]):

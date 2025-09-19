@@ -83,34 +83,25 @@ async def admin_panel_add_start(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def admin_panel_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['new_panel']['name'] = update.message.text
-    keyboard = [
-        [InlineKeyboardButton("Marzban", callback_data="panel_type_marzban")],
-[InlineKeyboardButton("Alireza (X-UI)", callback_data="panel_type_xui")],
-[InlineKeyboardButton("3x-UI", callback_data="panel_type_3xui")],
-[InlineKeyboardButton("TX-UI", callback_data="panel_type_txui")],
-[InlineKeyboardButton("Marzneshin", callback_data="panel_type_marzneshin")],
-[InlineKeyboardButton("Netico", callback_data="panel_type_netico")],
-    ]
-    await update.message.reply_text("نوع پنل را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ADMIN_PANEL_AWAIT_TYPE
+    # تنظیم خودکار نوع پنل به Netico
+    context.user_data['new_panel']['type'] = 'netico'
+    await update.message.reply_text(
+        "آدرس کامل (URL) پنل Netico را وارد کنید\n"
+        "- مثال: https://reseller.neticoapp.space\n"
+        "- اگر http/https ننویسید، به‌صورت خودکار https اضافه می‌شود",
+    )
+    return ADMIN_PANEL_AWAIT_URL
 
 
 async def admin_panel_receive_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # این تابع دیگر استفاده نمی‌شود اما برای حفظ سازگاری با کد قبلی نگه داشته شده است
     query = update.callback_query
-    p_type = query.data.replace("panel_type_", "").lower()
-    mapping = {
-        'marzban': 'marzban',
-        'xui': 'xui',
-        '3xui': '3xui',
-        'txui': 'txui',
-        'marzneshin': 'marzneshin',
-    }
-    context.user_data['new_panel']['type'] = mapping.get(p_type, 'xui')
+    context.user_data['new_panel']['type'] = 'netico'
     await _safe_edit_text(
         query.message,
-        "آدرس کامل (URL) پنل را وارد کنید\n"
-        "- مثال: http://1.2.3.4:2053 یا https://panel.example.com\n"
-        "- اگر http/https ننویسید، به‌صورت خودکار http اضافه می‌شود",
+        "آدرس کامل (URL) پنل Netico را وارد کنید\n"
+        "- مثال: https://reseller.neticoapp.space\n"
+        "- اگر http/https ننویسید، به‌صورت خودکار https اضافه می‌شود",
     )
     return ADMIN_PANEL_AWAIT_URL
 
@@ -118,24 +109,13 @@ async def admin_panel_receive_type(update: Update, context: ContextTypes.DEFAULT
 async def admin_panel_receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw_url = (update.message.text or '').strip().rstrip('/')
     if raw_url and not re.match(r'^[a-zA-Z][a-zA-Z0-9+\.-]*://', raw_url):
-        raw_url = f"http://{raw_url}"
+        raw_url = f"https://{raw_url}"  # برای Netico از https استفاده می‌کنیم
     context.user_data['new_panel']['url'] = raw_url
-    ptype = context.user_data['new_panel'].get('type')
-    if ptype in ('xui', '3xui', 'txui'):
-        example = "مثال: http://1.2.3.4:2096 یا http://example.com:2096 یا https://vpn.example.com:8443/app"
-        await update.message.reply_text(
-            "آدرس پایه ساب‌ لینک (subscription base) را وارد کنید.\n"
-            "- می‌تواند دامنه/پورت متفاوت با URL ورود داشته باشد.\n"
-            "- اگر مسیر (path) دارد، همان را هم وارد کنید.\n"
-            f"{example}\n\n"
-            "نکته: اگر http/https ننویسید، به‌صورت خودکار http اضافه می‌شود.\n"
-            "نکته: ربات به‌صورت خودکار /sub/{subId} یا /sub/{subId}?name={subId} را با توجه به نوع پنل اضافه می‌کند.")
-        return ADMIN_PANEL_AWAIT_SUB_BASE
-    # For Marzneshin, do NOT ask for API token here. We will auto-fetch token using username/password.
-    # Proceed to ask for admin username directly.
+    
+    # برای پنل Netico نیازی به درخواست ساب لینک نیست
+    # مستقیماً به مرحله درخواست نام کاربری می‌رویم
     await update.message.reply_text(
-        "نام کاربری (username) ادمین پنل را وارد کنید:\n"
-        "- URL و sub base اکنون می‌توانند http و آی‌پی باشند."
+        "نام کاربری (username) ادمین پنل Netico را وارد کنید:"
     )
     return ADMIN_PANEL_AWAIT_USER
 

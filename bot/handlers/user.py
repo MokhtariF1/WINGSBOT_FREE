@@ -364,7 +364,17 @@ async def show_specific_service_details(update: Update, context: ContextTypes.DE
             panel_type = (prow.get('panel_type') or '').lower()
     link_label = "\U0001F517 لینک اشتراک:"
     link_value = f"<code>{sub_link}</code>"
-    if panel_type in ('3xui','3x-ui','3x ui','xui','x-ui','sanaei','alireza','txui','tx-ui','tx ui'):
+    
+    # اضافه کردن پشتیبانی از پنل Netico
+    if panel_type == 'netico':
+        link_label = "\U0001F517 اطلاعات اتصال:"
+        # بررسی وجود اطلاعات اتصال در سفارش
+        connection_info = order.get('connection_info')
+        if connection_info:
+            link_value = f"<code>{connection_info}</code>"
+        else:
+            link_value = "اطلاعات اتصال یافت نشد. لطفا با پشتیبانی تماس بگیرید."
+    elif panel_type in ('3xui','3x-ui','3x ui','xui','x-ui','sanaei','alireza','txui','tx-ui','tx ui'):
         link_label = "\U0001F517 کانفیگ‌ها:"
         link_value = "کانفیگی یافت نشد. دکمه 'دریافت لینک مجدد' را بزنید تا ساخته شود."
         try:
