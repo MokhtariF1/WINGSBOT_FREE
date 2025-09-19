@@ -4194,7 +4194,7 @@ class NeticoAPI(BasePanelAPI):
             }
             
             # Insert into user_services table (assuming this table exists)
-            execute_db(
+            query_db(
                 "INSERT INTO user_services (panel_id, user_id, panel_username, panel_password, traffic_limit, created_at, expire_at, multi_user) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.panel_id, user_id, new_username, new_password, user_data['traffic_limit'], current_time, expire_time, multi_user)
             )
@@ -4313,7 +4313,7 @@ class NeticoAPI(BasePanelAPI):
         new_traffic_limit = current_traffic_limit + additional_traffic_bytes
         
         # Update database
-        execute_db(
+        query_db(
             "UPDATE user_services SET traffic_limit = ?, expire_at = ? WHERE panel_username = ? AND panel_id = ?",
             (new_traffic_limit, new_expire_timestamp, username, self.panel_id)
         )
