@@ -4272,7 +4272,8 @@ class NeticoAPI(BasePanelAPI):
                 connection_info = f"نام کاربری: {new_username}\nرمز عبور: {new_password}\nحجم: {traffic_gb} گیگابایت\nمدت: {duration_days} روز\nتعداد کاربر همزمان: {multi_user}"
                 
                 # Insert into user_services table with connection_info
-                query_db(
+                from .db import execute_db
+                execute_db(
                     "INSERT INTO user_services (panel_id, user_id, panel_username, panel_password, connection_info, traffic_limit, created_at, expire_at, multi_user) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.panel_id, user_id, new_username, new_password, connection_info, user_data['traffic_limit'], current_time, expire_time, multi_user)
                 )
