@@ -213,6 +213,16 @@ def db_setup():
             """
         )
         
+        # Check if connection_info column exists in user_services table
+        cursor.execute("PRAGMA table_info(user_services)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'connection_info' not in columns:
+            try:
+                cursor.execute("ALTER TABLE user_services ADD COLUMN connection_info TEXT")
+                logger.info("Added connection_info column to user_services table")
+            except sqlite3.Error as e:
+                logger.error(f"Error adding connection_info column: {e}")
+        
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS panel_inbounds (
