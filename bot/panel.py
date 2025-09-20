@@ -4171,7 +4171,7 @@ class NeticoAPI(BasePanelAPI):
         multi_user = 1
         
         try:
-            create_url = f"{self.base_url}/add_userPro.php?add"
+            create_url = f"{self.base_url}/add_userPro.php?add="
             
             # Prepare form data for multipart/form-data with exact boundary format
             import requests
@@ -4182,8 +4182,20 @@ class NeticoAPI(BasePanelAPI):
             boundary = f"----geckoformboundary{uuid.uuid4().hex[:32]}"
             
             # Prepare form data exactly as specified
-            multipart_data = MultipartEncoder(
-                fields={
+            # multipart_data = MultipartEncoder(
+            #     fields={
+            #         'user_id': '',  # Empty as per example
+            #         'username': new_username,
+            #         'password': new_password,
+            #         'total': str(int(traffic_gb)),  # Convert to integer GB
+            #         'date': str(date_value),
+            #         'op_multi': str(multi_user),
+            #         'op_agents': self.agent_id,
+            #         'submit': ''  # Empty as per example
+            #     },
+            #     boundary=boundary.replace('----', '')  # Remove prefix for internal use
+            # )
+            form_data = {
                     'user_id': '',  # Empty as per example
                     'username': new_username,
                     'password': new_password,
@@ -4193,9 +4205,9 @@ class NeticoAPI(BasePanelAPI):
                     'op_agents': self.agent_id,
                     'submit': ''  # Empty as per example
                 },
-                boundary=boundary.replace('----', '')  # Remove prefix for internal use
-            )
-            
+            data = {}
+            for key, value in form_data.items():
+                data[key] = (None, str(value))
             # Log the form data for debugging
             logger.info(f"Netico create_user form data: username={new_username}, password={new_password}, total={int(traffic_gb)}, date={date_value}, op_multi={multi_user}, op_agents={self.agent_id}")
             
@@ -4226,7 +4238,7 @@ class NeticoAPI(BasePanelAPI):
             # Send request with cookies
             r = self.session.post(
                 create_url,
-                data=multipart_data,
+                files=data,
                 headers=headers,
                 cookies=self.cookies,
             )
