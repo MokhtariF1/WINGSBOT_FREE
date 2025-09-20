@@ -4196,15 +4196,15 @@ class NeticoAPI(BasePanelAPI):
             #     boundary=boundary.replace('----', '')  # Remove prefix for internal use
             # )
             form_data = {
-                    'user_id': '',  # Empty as per example
-                    'username': new_username,
-                    'password': new_password,
-                    'total': str(int(traffic_gb)),  # Convert to integer GB
-                    'date': str(date_value),
-                    'op_multi': str(multi_user),
-                    'op_agents': self.agent_id,
-                    'submit': ''  # Empty as per example
-                },
+                'user_id': '',  # Empty as per example
+                'username': new_username,
+                'password': new_password,
+                'total': str(int(traffic_gb)),  # Convert to integer GB
+                'date': str(date_value),
+                'op_multi': str(multi_user),
+                'op_agents': self.agent_id,
+                'submit': ''  # Empty as per example
+            }
             data = {}
             for key, value in form_data.items():
                 data[key] = (None, str(value))
@@ -4218,7 +4218,7 @@ class NeticoAPI(BasePanelAPI):
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                # 'Content-Type': f'multipart/form-data; boundary={boundary}',
                 'Origin': self.base_url,
                 'Connection': 'keep-alive',
                 'Referer': create_url,
